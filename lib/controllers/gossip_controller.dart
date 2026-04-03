@@ -31,25 +31,32 @@ class GossipController {
         break;
 
       case 'connectionStateChanged':
-        final bool isConnected = call.arguments['isConnected'];
+        final bool isConnected = call.arguments['isConnected'] as bool? ?? false;
+        final bool? isGroupOwner = call.arguments['isGroupOwner'] as bool?;
+        final String groupOwnerAddress =
+            call.arguments['groupOwnerAddress'] as String? ?? '';
+        final int peerCount =
+            (call.arguments['peerCount'] as num?)?.toInt() ?? 0;
         if (!context.mounted) break;
-        if (isConnected) {
-          final bool isGroupOwner = call.arguments['isGroupOwner'] as bool;
-          final String groupOwnerAddress =
-              call.arguments['groupOwnerAddress'] as String? ?? '';
-          context.read<PeerProvider>().setP2pConnection(
-                connected: true,
-                isGroupOwner: isGroupOwner,
-                groupOwnerHost: groupOwnerAddress,
-              );
-        } else {
-          context.read<PeerProvider>().setP2pConnection(connected: false);
-        }
+        context.read<PeerProvider>().setP2pConnection(
+              connected: isConnected,
+              isGroupOwner: isGroupOwner,
+              groupOwnerHost: groupOwnerAddress,
+              peerCount: peerCount,
+            );
         break;
 
       case 'gossipTransportReady':
         if (context.mounted) {
-          context.read<PeerProvider>().setP2pConnection(connected: true);
+          final int peerCount =
+              (call.arguments['peerCount'] as num?)?.toInt() ?? 0;
+          final peerProvider = context.read<PeerProvider>();
+          context.read<PeerProvider>().setP2pConnection(
+                connected: true,
+                isGroupOwner: peerProvider.isGroupOwner,
+                groupOwnerHost: peerProvider.groupOwnerHost,
+                peerCount: peerCount,
+              );
         }
         break;
 
