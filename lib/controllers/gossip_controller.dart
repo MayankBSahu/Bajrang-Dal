@@ -5,6 +5,7 @@ import '../providers/feed_provider.dart';
 import '../providers/identity_provider.dart';
 import '../providers/mesh_debug_provider.dart';
 import '../providers/peer_provider.dart';
+import '../providers/room_provider.dart';
 
 class GossipController {
   final BuildContext context;
@@ -116,6 +117,14 @@ class GossipController {
       case 'gossipApplyPosts':
         if (!context.mounted) return null;
         final list = call.arguments['posts'] as List<dynamic>? ?? [];
+        final roomProvider = context.read<RoomProvider>();
+        for (final item in list) {
+          if (item is! Map) continue;
+          final m = Map<String, dynamic>.from(item);
+          final roomId = m['room_id'] as String? ?? 'general';
+          final roomName = m['room_name'] as String? ?? 'General';
+          await roomProvider.ensureRoomForPost(roomId: roomId, roomName: roomName);
+        }
         final feed = context.read<FeedProvider>();
         await feed.applyPostsFromGossip(list);
         return null;

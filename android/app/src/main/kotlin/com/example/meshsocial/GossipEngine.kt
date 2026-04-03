@@ -88,6 +88,8 @@ object GossipEngine {
                 merged.add(
                     mapOf(
                         "post_id" to postId,
+                        "room_id" to o.optString("room_id", "general"),
+                        "room_name" to o.optString("room_name", "General"),
                         "author_id" to authorId,
                         "author_name" to o.optString("author_name", "Unknown"),
                         "content" to o.optString("content", ""),

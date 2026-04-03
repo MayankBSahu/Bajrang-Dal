@@ -3,6 +3,7 @@ import 'package:path/path.dart';
 import '../models/post.dart';
 import '../models/peer.dart';
 import '../models/identity.dart';
+import '../models/room.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -20,7 +21,7 @@ class DatabaseHelper {
     final path = join(dbPath, fileName);
     return openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
     );
@@ -37,8 +38,21 @@ class DatabaseHelper {
     ''');
 
     await db.execute('''
+      CREATE TABLE rooms (
+        room_id     TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        is_locked   INTEGER DEFAULT 0,
+        password    TEXT DEFAULT '',
+        created_at  TEXT NOT NULL,
+        joined_at   TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
       CREATE TABLE posts (
         post_id     TEXT PRIMARY KEY,
+        room_id     TEXT NOT NULL,
+        room_name   TEXT NOT NULL,
         author_id   TEXT NOT NULL,
         author_name TEXT NOT NULL,
         content     TEXT NOT NULL,
@@ -58,6 +72,8 @@ class DatabaseHelper {
         last_seen      TEXT NOT NULL
       )
     ''');
+
+    await _ensureDefaultRoom(db);
   }
 
   Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -66,6 +82,41 @@ class DatabaseHelper {
         "ALTER TABLE peers ADD COLUMN transport TEXT DEFAULT 'wifiDirect'",
       );
     }
+    if (oldVersion < 3) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS rooms (
+          room_id     TEXT PRIMARY KEY,
+          name        TEXT NOT NULL,
+          is_locked   INTEGER DEFAULT 0,
+          password    TEXT DEFAULT '',
+          created_at  TEXT NOT NULL,
+          joined_at   TEXT NOT NULL
+        )
+      ''');
+      await db.execute(
+        "ALTER TABLE posts ADD COLUMN room_id TEXT NOT NULL DEFAULT 'general'",
+      );
+      await db.execute(
+        "ALTER TABLE posts ADD COLUMN room_name TEXT NOT NULL DEFAULT 'General'",
+      );
+      await _ensureDefaultRoom(db);
+    }
+  }
+
+  Future<void> _ensureDefaultRoom(Database db) async {
+    final now = DateTime.now();
+    await db.insert(
+      'rooms',
+      Room(
+        roomId: 'general',
+        name: 'General',
+        isLocked: false,
+        password: '',
+        createdAt: now,
+        joinedAt: now,
+      ).toMap(),
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
   }
 
   // --- Identity ---
@@ -92,6 +143,17 @@ class DatabaseHelper {
   Future<List<Post>> getAllPosts() async {
     final db = await database;
     final rows = await db.query('posts', orderBy: 'created_at DESC');
+    return rows.map(Post.fromMap).toList();
+  }
+
+  Future<List<Post>> getPostsForRoom(String roomId) async {
+    final db = await database;
+    final rows = await db.query(
+      'posts',
+      where: 'room_id = ?',
+      whereArgs: [roomId],
+      orderBy: 'created_at DESC',
+    );
     return rows.map(Post.fromMap).toList();
   }
 
@@ -124,5 +186,36 @@ class DatabaseHelper {
     final db = await database;
     final rows = await db.query('peers', orderBy: 'last_seen DESC');
     return rows.map(Peer.fromMap).toList();
+  }
+
+  // --- Rooms ---
+  Future<void> upsertRoom(Room room) async {
+    final db = await database;
+    await db.insert(
+      'rooms',
+      room.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<Room?> getRoom(String roomId) async {
+    final db = await database;
+    final rows = await db.query(
+      'rooms',
+      where: 'room_id = ?',
+      whereArgs: [roomId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return Room.fromMap(rows.first);
+  }
+
+  Future<List<Room>> getRooms() async {
+    final db = await database;
+    final rows = await db.query(
+      'rooms',
+      orderBy: 'joined_at DESC, name COLLATE NOCASE ASC',
+    );
+    return rows.map(Room.fromMap).toList();
   }
 }

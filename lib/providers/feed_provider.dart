@@ -6,15 +6,26 @@ import '../db/database_helper.dart';
 class FeedProvider extends ChangeNotifier {
   List<Post> _posts = [];
   List<Post> get posts => _posts;
+  String _activeRoomId = 'general';
+  String get activeRoomId => _activeRoomId;
 
-  Future<void> loadPosts() async {
-    _posts = await DatabaseHelper.instance.getAllPosts();
+  Future<void> loadPosts({String? roomId}) async {
+    _activeRoomId = roomId ?? _activeRoomId;
+    _posts = await DatabaseHelper.instance.getPostsForRoom(_activeRoomId);
     notifyListeners();
   }
 
-  Future<Post> createPost(String content, String authorId, String authorName) async {
+  Future<Post> createPost(
+    String content,
+    String authorId,
+    String authorName, {
+    required String roomId,
+    required String roomName,
+  }) async {
     final post = Post(
       postId: const Uuid().v4(),
+      roomId: roomId,
+      roomName: roomName,
       authorId: authorId,
       authorName: authorName,
       content: content,
@@ -23,8 +34,10 @@ class FeedProvider extends ChangeNotifier {
       synced: false,
     );
     await DatabaseHelper.instance.insertPost(post);
-    _posts.insert(0, post);
-    notifyListeners();
+    if (_activeRoomId == roomId) {
+      _posts.insert(0, post);
+      notifyListeners();
+    }
     return post;
   }
 
@@ -38,23 +51,25 @@ class FeedProvider extends ChangeNotifier {
 
   /// Serialized rows for P2P sync (same shape as DB / [Post.toMap]).
   Future<List<Map<String, dynamic>>> exportPostsForSync() async {
-    return _posts.map((p) => p.toMap()).toList();
+    final posts = await DatabaseHelper.instance.getAllPosts();
+    return posts.map((p) => p.toMap()).toList();
   }
 
   /// Returns only the post IDs for HELLO handshake (Delta Sync).
   Future<List<String>> exportPostIdsForSync() async {
-    return _posts.map((p) => p.postId).toList();
+    return await DatabaseHelper.instance.getPostIds();
   }
 
   /// Returns serialized rows for specific requested post IDs.
   Future<List<Map<String, dynamic>>> exportSpecificPosts(List<String> requestedIds) async {
     final requestedSet = requestedIds.toSet();
-    return _posts.where((p) => requestedSet.contains(p.postId)).map((p) => p.toMap()).toList();
+    final posts = await DatabaseHelper.instance.getAllPosts();
+    return posts.where((p) => requestedSet.contains(p.postId)).map((p) => p.toMap()).toList();
   }
 
   Future<void> markOwnPostsSynced(String authorId) async {
     await DatabaseHelper.instance.markAuthorPostsSynced(authorId);
-    await loadPosts();
+    await loadPosts(roomId: _activeRoomId);
   }
 
   /// Inserts merged rows produced by native [GossipEngine] (snake_case maps).
@@ -64,6 +79,8 @@ class FeedProvider extends ChangeNotifier {
       final m = Map<String, dynamic>.from(item);
       final post = Post(
         postId: m['post_id'] as String? ?? '',
+        roomId: m['room_id'] as String? ?? 'general',
+        roomName: m['room_name'] as String? ?? 'General',
         authorId: m['author_id'] as String? ?? '',
         authorName: m['author_name'] as String? ?? 'Unknown',
         content: m['content'] as String? ?? '',
@@ -75,6 +92,6 @@ class FeedProvider extends ChangeNotifier {
       if (post.postId.isEmpty) continue;
       await DatabaseHelper.instance.insertPost(post);
     }
-    await loadPosts();
+    await loadPosts(roomId: _activeRoomId);
   }
 }

@@ -1,5 +1,7 @@
 class Post {
   final String postId;
+  final String roomId;
+  final String roomName;
   final String authorId;
   final String authorName;
   final String content;
@@ -9,6 +11,8 @@ class Post {
 
   Post({
     required this.postId,
+    required this.roomId,
+    required this.roomName,
     required this.authorId,
     required this.authorName,
     required this.content,
@@ -19,6 +23,8 @@ class Post {
 
   Map<String, dynamic> toMap() => {
     'post_id': postId,
+    'room_id': roomId,
+    'room_name': roomName,
     'author_id': authorId,
     'author_name': authorName,
     'content': content,
@@ -29,6 +35,8 @@ class Post {
 
   factory Post.fromMap(Map<String, dynamic> m) => Post(
     postId: m['post_id'],
+    roomId: m['room_id'] ?? 'general',
+    roomName: m['room_name'] ?? 'General',
     authorId: m['author_id'],
     authorName: m['author_name'],
     content: m['content'],
