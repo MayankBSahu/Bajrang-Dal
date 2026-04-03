@@ -93,6 +93,12 @@ class DatabaseHelper {
         where: 'post_id = ?', whereArgs: [postId]);
   }
 
+  Future<void> markAuthorPostsSynced(String authorId) async {
+    final db = await database;
+    await db.update('posts', {'synced': 1},
+        where: 'author_id = ?', whereArgs: [authorId]);
+  }
+
   // --- Peers ---
   Future<void> upsertPeer(Peer peer) async {
     final db = await database;

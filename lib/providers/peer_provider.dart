@@ -8,6 +8,24 @@ class PeerProvider extends ChangeNotifier {
   bool _isDiscovering = false;
   bool get isDiscovering => _isDiscovering;
 
+  bool _p2pConnected = false;
+  bool get p2pConnected => _p2pConnected;
+  bool? _isGroupOwner;
+  bool? get isGroupOwner => _isGroupOwner;
+  String? _groupOwnerHost;
+  String? get groupOwnerHost => _groupOwnerHost;
+
+  void setP2pConnection({
+    required bool connected,
+    bool? isGroupOwner,
+    String? groupOwnerHost,
+  }) {
+    _p2pConnected = connected;
+    _isGroupOwner = isGroupOwner;
+    _groupOwnerHost = groupOwnerHost;
+    notifyListeners();
+  }
+
   Future<void> loadPeers() async {
     _peers = await DatabaseHelper.instance.getKnownPeers();
     notifyListeners();

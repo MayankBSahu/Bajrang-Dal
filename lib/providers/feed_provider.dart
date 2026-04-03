@@ -35,4 +35,35 @@ class FeedProvider extends ChangeNotifier {
     }
     await loadPosts();
   }
+
+  /// Serialized rows for P2P sync (same shape as DB / [Post.toMap]).
+  Future<List<Map<String, dynamic>>> exportPostsForSync() async {
+    return _posts.map((p) => p.toMap()).toList();
+  }
+
+  Future<void> markOwnPostsSynced(String authorId) async {
+    await DatabaseHelper.instance.markAuthorPostsSynced(authorId);
+    await loadPosts();
+  }
+
+  /// Inserts merged rows produced by native [GossipEngine] (snake_case maps).
+  Future<void> applyPostsFromGossip(List<dynamic> raw) async {
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final m = Map<String, dynamic>.from(item);
+      final post = Post(
+        postId: m['post_id'] as String? ?? '',
+        authorId: m['author_id'] as String? ?? '',
+        authorName: m['author_name'] as String? ?? 'Unknown',
+        content: m['content'] as String? ?? '',
+        createdAt: DateTime.tryParse(m['created_at'] as String? ?? '') ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+        hopCount: (m['hop_count'] as num?)?.toInt() ?? 0,
+        synced: m['synced'] == 1 || m['synced'] == true,
+      );
+      if (post.postId.isEmpty) continue;
+      await DatabaseHelper.instance.insertPost(post);
+    }
+    await loadPosts();
+  }
 }

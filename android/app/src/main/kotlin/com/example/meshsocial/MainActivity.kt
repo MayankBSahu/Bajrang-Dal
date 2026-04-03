@@ -1,10 +1,11 @@
 package com.example.meshsocial
 
+import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import android.os.Bundle
 
+/** Flutter UI + Dart DB; [P2PManager] + [GossipEngine] implement mesh. Android-only target. */
 class MainActivity : FlutterActivity() {
 
     private val CHANNEL = "meshsocial/p2p"
@@ -31,6 +32,12 @@ class MainActivity : FlutterActivity() {
                         p2pManager.sendGossipPayload(address, payload, result)
                     }
                     "getDeviceAddress"   -> p2pManager.getDeviceAddress(result)
+                    "openWifiSettings"   -> p2pManager.openWifiSettings(result)
+                    "pushGossipSync"    -> p2pManager.pushGossipSync(result)
+                    "sendDebugPing"     -> {
+                        val payload = call.argument<String>("payload") ?: "DEBUG_PING|unknown"
+                        p2pManager.sendDebugPing(payload, result)
+                    }
                     else                 -> result.notImplemented()
                 }
             }
