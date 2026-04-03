@@ -7,20 +7,20 @@ import 'package:provider/provider.dart';
 import '../channels/p2p_channel.dart';
 import '../models/peer.dart';
 import '../p2p_permissions.dart';
-import '../providers/peer_provider.dart';
 import '../providers/mesh_debug_provider.dart';
+import '../providers/peer_provider.dart';
 
-Future<void> _toggleNearbyScan(BuildContext context) async {
+Future<void> _toggleWifiScan(BuildContext context) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   final peerProvider = context.read<PeerProvider>();
-  final isDiscovering = peerProvider.isDiscovering;
+  final isDiscovering = peerProvider.wifiDiscovering;
 
   void showErr(String msg) {
     messenger?.showSnackBar(SnackBar(content: Text(msg)));
   }
 
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
-    showErr('Wi‑Fi Direct scanning only works on a physical Android device.');
+    showErr('Wi-Fi Direct scanning only works on a physical Android device.');
     return;
   }
 
@@ -39,7 +39,7 @@ Future<void> _toggleNearbyScan(BuildContext context) async {
     messenger?.showSnackBar(
       SnackBar(
         content: const Text(
-          'Allow Location (Android 12 and below) or Nearby Wi‑Fi devices (Android 13+) to scan.',
+          'Allow Location or Nearby Wi-Fi devices to scan over Wi-Fi Direct.',
         ),
         action: SnackBarAction(
           label: 'Settings',
@@ -55,12 +55,11 @@ Future<void> _toggleNearbyScan(BuildContext context) async {
   } on PlatformException catch (e) {
     showErr(e.message ?? e.code);
   } on MissingPluginException {
-    showErr('Native Wi‑Fi Direct is not available on this platform build.');
+    showErr('Native Wi-Fi Direct is not available on this platform build.');
   }
 }
 
-
-Future<void> _connectToPeer(BuildContext context, String deviceAddress) async {
+Future<void> _connectToPeer(BuildContext context, Peer peer) async {
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       const SnackBar(content: Text('Connect requires an Android device.')),
@@ -74,27 +73,32 @@ Future<void> _connectToPeer(BuildContext context, String deviceAddress) async {
   if (!allowed) {
     messenger?.showSnackBar(
       SnackBar(
-        content: const Text('Grant Location or Nearby Wi‑Fi permission first.'),
-        action: SnackBarAction(label: 'Settings', onPressed: () => openAppSettings()),
+        content: const Text('Grant Wi-Fi Direct permissions first.'),
+        action: SnackBarAction(
+          label: 'Settings',
+          onPressed: () => openAppSettings(),
+        ),
       ),
     );
     return;
   }
+
   try {
-    await P2PChannel.connectToPeer(deviceAddress);
+    await P2PChannel.connectToPeer(peer.deviceAddress);
     if (!context.mounted) return;
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text('Invite sent! The other phone must accept the prompt (check notifications or Wi‑Fi settings).'),
+        content: const Text(
+          'Wi-Fi Direct invite sent. Keep both phones nearby until connected.',
+        ),
         duration: const Duration(seconds: 8),
         action: SnackBarAction(
-          label: 'Open Wi‑Fi',
+          label: 'Open Wi-Fi',
           onPressed: () => P2PChannel.openWifiSettings(),
         ),
       ),
     );
-
   } on PlatformException catch (e) {
     messenger?.showSnackBar(
       SnackBar(
@@ -109,31 +113,53 @@ Future<void> _connectToPeer(BuildContext context, String deviceAddress) async {
   }
 }
 
-class NearbyScreen extends StatelessWidget {
+class NearbyScreen extends StatefulWidget {
   const NearbyScreen({super.key});
 
+  @override
+  State<NearbyScreen> createState() => _NearbyScreenState();
+}
+
+class _NearbyScreenState extends State<NearbyScreen> {
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
   Color _statusColor(PeerStatus s) => switch (s) {
-    PeerStatus.connected => Colors.green,
-    PeerStatus.discovered => Colors.orange,
-    PeerStatus.disconnected => Colors.grey,
-  };
+        PeerStatus.connected => Colors.green,
+        PeerStatus.discovered => Colors.orange,
+        PeerStatus.disconnected => Colors.grey,
+      };
 
   @override
   Widget build(BuildContext context) {
-    final peers = context.watch<PeerProvider>().peers;
-    final isDiscovering = context.watch<PeerProvider>().isDiscovering;
-    
-    final p2pConnected = context.watch<PeerProvider>().p2pConnected;
-    final isGo = context.watch<PeerProvider>().isGroupOwner;
+    final peerProvider = context.watch<PeerProvider>();
+    final peers = peerProvider.peers;
+    final query = _searchQuery.trim().toLowerCase();
+    final filteredPeers = query.isEmpty
+        ? peers
+        : peers.where((peer) {
+            final name = peer.displayName.toLowerCase();
+            final address = peer.deviceAddress.toLowerCase();
+            return name.contains(query) || address.contains(query);
+          }).toList();
+    final wifiDiscovering = peerProvider.wifiDiscovering;
+    final wifiConnected = peerProvider.wifiConnected;
+    final isGo = peerProvider.isGroupOwner;
     final debug = context.watch<MeshDebugProvider>();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Nearby Peers'),
         actions: [
-          if (isDiscovering)
-            Padding(
-              padding: const EdgeInsets.all(16.0),
+          if (wifiDiscovering)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
               child: SizedBox(
                 width: 24,
                 height: 24,
@@ -145,11 +171,6 @@ class NearbyScreen extends StatelessWidget {
             ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _toggleNearbyScan(context),
-        icon: Icon(isDiscovering ? Icons.stop : Icons.search),
-        label: Text(isDiscovering ? 'Stop' : 'Scan'),
-      ),
       body: Column(
         children: [
           Material(
@@ -159,8 +180,40 @@ class NearbyScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  FilledButton.tonalIcon(
+                    onPressed: () => _toggleWifiScan(context),
+                    icon: Icon(wifiDiscovering ? Icons.stop : Icons.wifi),
+                    label: Text(wifiDiscovering ? 'Stop Wi-Fi' : 'Scan Wi-Fi'),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _searchController,
+                    onChanged: (value) {
+                      setState(() {
+                        _searchQuery = value;
+                      });
+                    },
+                    decoration: InputDecoration(
+                      hintText: 'Search devices by name or address',
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: _searchQuery.isEmpty
+                          ? null
+                          : IconButton(
+                              onPressed: () {
+                                _searchController.clear();
+                                setState(() {
+                                  _searchQuery = '';
+                                });
+                              },
+                              icon: const Icon(Icons.clear),
+                            ),
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   const Text(
-                    'Mesh raw debug (TCP delivery)',
+                    'Mesh raw debug',
                     style: TextStyle(fontWeight: FontWeight.w600),
                   ),
                   const SizedBox(height: 8),
@@ -194,9 +247,7 @@ class NearbyScreen extends StatelessWidget {
                               .setDebugPingSent(payload: payload);
                         } catch (e) {
                           if (!context.mounted) return;
-                          context
-                              .read<MeshDebugProvider>()
-                              .setError(e.toString());
+                          context.read<MeshDebugProvider>().setError(e.toString());
                         }
                       },
                       child: const Text('Send debug ping'),
@@ -206,23 +257,26 @@ class NearbyScreen extends StatelessWidget {
               ),
             ),
           ),
-          if (!p2pConnected)
+          if (!wifiConnected)
             Material(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withValues(alpha: 0.6),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.info_outline,
-                        size: 22,
-                        color: Theme.of(context).colorScheme.primary),
+                    Icon(
+                      Icons.info_outline,
+                      size: 22,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'After you tap Connect, an invite will be sent. The other phone '
-                        'must Accept it from their notifications or Wi‑Fi settings. '
-                        'Keep Scan ON on both phones until connected.',
+                        'Scan over Wi-Fi Direct, then tap Connect on a discovered peer.',
                         style: TextStyle(
                           fontSize: 12.5,
                           height: 1.3,
@@ -234,16 +288,16 @@ class NearbyScreen extends StatelessWidget {
                 ),
               ),
             ),
-          if (p2pConnected)
+          if (wifiConnected)
             Material(
               color: Colors.green.shade100,
               child: ListTile(
                 dense: true,
-                leading: const Icon(Icons.link, color: Colors.green),
+                leading: const Icon(Icons.wifi, color: Colors.green),
                 title: Text(
                   isGo == true
-                      ? 'P2P link up — you are group owner (gossip relay)'
-                      : 'P2P link up — connected to group owner',
+                      ? 'Wi-Fi Direct link up - you are group owner'
+                      : 'Wi-Fi Direct link up',
                   style: const TextStyle(fontSize: 13),
                 ),
               ),
@@ -255,66 +309,80 @@ class NearbyScreen extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Text(
-                          'No peers found yet.\nTap Scan to start.',
+                          'No peers found yet.\nScan Wi-Fi Direct to start.',
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 16),
-                        if (!isDiscovering)
-                          ElevatedButton(
-                            onPressed: () => _toggleNearbyScan(context),
-                            child: const Text('Start Scanning'),
-                          ),
+                        ElevatedButton(
+                          onPressed: () => _toggleWifiScan(context),
+                          child: const Text('Scan Wi-Fi'),
+                        ),
                       ],
                     ),
                   )
-                : ListView.builder(
-                    itemCount: peers.length,
-                    itemBuilder: (ctx, i) {
-                      final peer = peers[i];
-                      return ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: _statusColor(peer.status),
-                          child: Text(
-                            peer.displayName.isNotEmpty
-                                ? peer.displayName[0].toUpperCase()
-                                : 'P',
-                            style: const TextStyle(color: Colors.white),
-                          ),
+                : filteredPeers.isEmpty
+                    ? Center(
+                        child: Text(
+                          'No devices match "${_searchQuery.trim()}".',
+                          textAlign: TextAlign.center,
                         ),
-                        title: Text(peer.displayName.isNotEmpty
-                            ? peer.displayName
-                            : 'Unknown Device'),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(peer.deviceAddress,
-                                style: const TextStyle(fontSize: 11)),
-                            Text('Last seen: ${_formatTime(peer.lastSeen)}',
-                                style: const TextStyle(
-                                    fontSize: 11, color: Colors.grey)),
-                          ],
-                        ),
-                        trailing: p2pConnected
-                            ? ElevatedButton(
-                                onPressed: P2PChannel.disconnect,
-                                style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.red),
-                                child: const Text('Disconnect'),
-                              )
-                            : peer.status == PeerStatus.discovered
-                                ? ElevatedButton(
-                                    onPressed: () => _connectToPeer(
-                                        context, peer.deviceAddress),
-                                    child: const Text('Connect'),
-                                  )
-                                : Chip(
-                                    label: Text(peer.status.name),
-                                    backgroundColor: _statusColor(peer.status)
-                                        .withValues(alpha: 0.15),
+                      )
+                    : ListView.builder(
+                        itemCount: filteredPeers.length,
+                        itemBuilder: (ctx, i) {
+                          final peer = filteredPeers[i];
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: _statusColor(peer.status),
+                              child: Text(
+                                peer.displayName.isNotEmpty
+                                    ? peer.displayName[0].toUpperCase()
+                                    : 'P',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            ),
+                            title: Text(
+                              peer.displayName.isNotEmpty
+                                  ? peer.displayName
+                                  : 'Unknown Device',
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  peer.deviceAddress,
+                                  style: const TextStyle(fontSize: 11),
+                                ),
+                                Text(
+                                  'Last seen: ${_formatTime(peer.lastSeen)}',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey,
                                   ),
-                      );
-                    },
-                  ),
+                                ),
+                              ],
+                            ),
+                            trailing: wifiConnected
+                                ? ElevatedButton(
+                                    onPressed: P2PChannel.disconnect,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.red,
+                                    ),
+                                    child: const Text('Disconnect'),
+                                  )
+                                : peer.status == PeerStatus.discovered
+                                    ? ElevatedButton(
+                                        onPressed: () => _connectToPeer(context, peer),
+                                        child: const Text('Connect'),
+                                      )
+                                    : Chip(
+                                        label: Text(peer.status.name),
+                                        backgroundColor: _statusColor(peer.status)
+                                            .withValues(alpha: 0.15),
+                                      ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
@@ -324,7 +392,7 @@ class NearbyScreen extends StatelessWidget {
   String _formatTime(DateTime dateTime) {
     final now = DateTime.now();
     final difference = now.difference(dateTime);
-    
+
     if (difference.inSeconds < 60) {
       return 'Just now';
     } else if (difference.inMinutes < 60) {

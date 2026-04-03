@@ -5,11 +5,13 @@ import '../db/database_helper.dart';
 class PeerProvider extends ChangeNotifier {
   List<Peer> _peers = [];
   List<Peer> get peers => _peers;
-  bool _isDiscovering = false;
-  bool get isDiscovering => _isDiscovering;
+  bool _wifiDiscovering = false;
+  bool get wifiDiscovering => _wifiDiscovering;
+  bool get isDiscovering => _wifiDiscovering;
 
-  bool _p2pConnected = false;
-  bool get p2pConnected => _p2pConnected;
+  bool _wifiConnected = false;
+  bool get wifiConnected => _wifiConnected;
+  bool get p2pConnected => _wifiConnected;
   bool? _isGroupOwner;
   bool? get isGroupOwner => _isGroupOwner;
   String? _groupOwnerHost;
@@ -23,10 +25,10 @@ class PeerProvider extends ChangeNotifier {
     String? groupOwnerHost,
     int? peerCount,
   }) {
-    _p2pConnected = connected;
+    _wifiConnected = connected;
     _isGroupOwner = isGroupOwner;
     _groupOwnerHost = groupOwnerHost;
-    _peerCount = peerCount ?? _peerCount;
+    _peerCount = connected ? (peerCount ?? _peerCount) : 0;
     notifyListeners();
   }
 
@@ -55,14 +57,19 @@ class PeerProvider extends ChangeNotifier {
   }
 
   void setDiscoveryState(bool isDiscovering) {
-    _isDiscovering = isDiscovering;
+    _wifiDiscovering = isDiscovering;
+    notifyListeners();
+  }
+
+  void clearDiscoveredPeers() {
+    _peers = [];
     notifyListeners();
   }
 
   void handlePeersDiscovered(List<Map<String, dynamic>> peersData) {
     for (final peerData in peersData) {
       final peer = Peer(
-        peerId: peerData['deviceAddress'], // Using device address as ID for now
+        peerId: peerData['deviceAddress'],
         displayName: peerData['deviceName'],
         deviceAddress: peerData['deviceAddress'],
         status: PeerStatus.discovered,
