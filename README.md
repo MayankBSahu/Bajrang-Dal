@@ -1,95 +1,215 @@
+<div align="center">
+
 # MeshSocial
 
-MeshSocial is an Android-first offline social app built with Flutter and native Kotlin networking.
+**An Android-first offline social app that syncs room-based posts over Wi-Fi Direct using a lightweight gossip protocol.**
 
-It uses:
-- Flutter for UI, local persistence, and app state
-- Kotlin for Wi-Fi Direct discovery, connection management, and TCP gossip transport
-- SQLite for identities, peers, rooms, and posts
+[![Flutter](https://img.shields.io/badge/Flutter-UI%20Layer-02569B?logo=flutter&logoColor=white)](https://flutter.dev/)
+[![Dart](https://img.shields.io/badge/Dart-3.11%2B-0175C2?logo=dart&logoColor=white)](https://dart.dev/)
+[![Kotlin](https://img.shields.io/badge/Kotlin-Native%20P2P-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org/)
+[![Android](https://img.shields.io/badge/Android-Wi--Fi%20Direct-3DDC84?logo=android&logoColor=white)](https://developer.android.com/)
+[![SQLite](https://img.shields.io/badge/SQLite-Local%20Storage-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/index.html)
 
-## What It Does
+</div>
 
-MeshSocial lets nearby Android devices exchange posts without internet access.
+---
 
-Current features:
-- Wi-Fi Direct peer discovery and connection
-- TCP-based gossip sync over a Flutter `MethodChannel`
-- delta sync instead of full database dumps
-- password-protected rooms
-- room-scoped feed UI
-- local peer list with device search
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Permissions](#permissions)
+- [Usage](#usage)
+- [Gossip Sync Flow](#gossip-sync-flow)
+- [Data Model](#data-model)
+- [Current Limitations](#current-limitations)
+- [Contributing](#contributing)
+
+---
+
+## Overview
+
+MeshSocial enables nearby Android devices to share posts without internet connectivity.
+
+The app combines:
+- Flutter for UI, local state management, and app-level persistence
+- Native Kotlin for Wi-Fi Direct discovery, P2P session management, and TCP transport
+- SQLite for offline-first storage of identities, peers, rooms, and posts
+
+The result is a practical local mesh-style social experience where users can discover peers, connect, create/join rooms, and gossip-sync room posts across devices.
+
+---
+
+## Features
+
+| Category | Details |
+|---|---|
+| **Offline Messaging** | Exchange posts over local Wi-Fi Direct without internet |
+| **Room-Based Feeds** | Create rooms, join rooms, and scope posts to the active room |
+| **Locked Rooms** | Optional room password check for controlled access |
+| **Peer Discovery** | Scan nearby devices and connect/disconnect from the Nearby screen |
+| **Delta Gossip Sync** | Sync only missing posts instead of full database dumps |
+| **Native Bridge** | Flutter <-> Kotlin integration via MethodChannel (`meshsocial/p2p`) |
+| **Local Persistence** | SQLite-backed storage for identity, rooms, posts, and peers |
+| **Debug Tooling** | Debug ping + mesh status indicators to validate transport state |
+
+---
 
 ## Architecture
 
-Flutter side:
-- UI screens in `lib/screens`
-- providers in `lib/providers`
-- local database in `lib/db/database_helper.dart`
-- native event handling in `lib/controllers/gossip_controller.dart`
+### Flutter Layer
 
-Android side:
-- `P2PManager.kt` handles Wi-Fi Direct lifecycle and gossip transport orchestration
-- `SocketServer.kt` manages the TCP transport
-- `GossipEngine.kt` builds and parses protocol envelopes
-- `MainActivity.kt` exposes native features over `MethodChannel('meshsocial/p2p')`
+- UI screens in `lib/screens/`
+- State providers in `lib/providers/`
+- SQLite helper in `lib/db/database_helper.dart`
+- Native event handling in `lib/controllers/gossip_controller.dart`
 
-## Gossip Protocol
+### Android Native Layer
 
-The app uses a two-way delta sync:
+- `P2PManager.kt`: Wi-Fi Direct lifecycle + orchestration
+- `SocketServer.kt`: TCP socket transport and session handling
+- `GossipEngine.kt`: protocol envelope building/parsing
+- `MainActivity.kt`: bridge exposure over MethodChannel
 
-1. Device A sends `HELLO` with only post IDs.
-2. Device B compares those IDs against its local database.
-3. Device B responds with `SYNC`:
-   - posts A is missing
-   - request IDs for posts B is missing
-4. A sends a second `SYNC` to fulfill those requested posts.
+---
 
-This keeps transfers smaller than bulk database sync.
+## Project Structure
 
-## Rooms
+```text
+Bajrang-Dal/
+|- README.md
+|- pubspec.yaml
+|- lib/
+|  |- main.dart
+|  |- app.dart
+|  |- channels/
+|  |  |- p2p_channel.dart
+|  |- controllers/
+|  |  |- gossip_controller.dart
+|  |- db/
+|  |  |- database_helper.dart
+|  |- models/
+|  |  |- identity.dart
+|  |  |- peer.dart
+|  |  |- post.dart
+|  |  |- room.dart
+|  |- providers/
+|  |  |- feed_provider.dart
+|  |  |- identity_provider.dart
+|  |  |- mesh_debug_provider.dart
+|  |  |- peer_provider.dart
+|  |  |- room_provider.dart
+|  |- screens/
+|     |- feed_screen.dart
+|     |- nearby_screen.dart
+|     |- profile_screen.dart
+|     |- home_screen.dart
+|- android/app/src/main/kotlin/com/example/meshsocial/
+|  |- MainActivity.kt
+|  |- P2PManager.kt
+|  |- SocketServer.kt
+|  |- GossipEngine.kt
+|- ios/
+|- macos/
+|- linux/
+|- windows/
+|- web/
+`- test/
+```
 
-Rooms are first-class app data and posts belong to a room.
+---
 
-Current room behavior:
-- `General` is created automatically as the default room
-- users can create rooms
-- rooms can be marked locked with a password
-- users can join an existing room by room name and password
-- the feed only shows posts for the active room
+## Prerequisites
 
-Important limitation:
-- room passwords are currently an app-level access check, not end-to-end encryption
-- synced posts carry `room_id` and `room_name`, but room passwords are not used as cryptographic protection
+- Flutter SDK (compatible with Dart 3.11+ as defined in `pubspec.yaml`)
+- Android Studio + Android SDK
+- At least 2 physical Android devices for realistic P2P validation
 
-## UI
+---
 
-Main tabs:
-- Feed
-- Nearby
-- Profile
+## Installation
 
-Feed:
-- active room header
-- room switching chips
-- create room / join room actions
-- improved post cards
-- composer scoped to the active room
+1. Clone the repository
 
-Nearby:
-- Wi-Fi Direct scan / stop scan
-- device search
-- connect / disconnect
-- debug ping and mesh debug state
+   ```bash
+   git clone https://github.com/MayankBSahu/Bajrang-Dal.git
+   cd Bajrang-Dal
+   ```
 
-## Database
+2. Install dependencies
 
-SQLite tables currently include:
+   ```bash
+   flutter pub get
+   ```
+
+3. Run on a connected Android device
+
+   ```bash
+   flutter run
+   ```
+
+---
+
+## Permissions
+
+For Wi-Fi Direct discovery on Android, runtime permissions are required:
+
+- Android 12 and below: location permission
+- Android 13 and above: nearby Wi-Fi devices permission
+
+The app requests these when scanning starts from the Nearby screen.
+
+---
+
+## Usage
+
+1. Launch the app on two Android devices.
+2. Open Nearby on both devices.
+3. Start scan and connect one device to the other.
+4. Create or join the same room.
+5. Post in Feed and verify that the second device receives updates via gossip sync.
+
+### Main Screens
+
+- **Feed**: active room, room switching, compose post, sync status card
+- **Nearby**: scan/stop, peer search, connect/disconnect, debug ping
+- **Profile**: device identity and local post summary
+
+---
+
+## Gossip Sync Flow
+
+```text
+Device A                           Device B
+--------                           --------
+HELLO(post_ids) --------------->   Compare with local DB
+                                   Build delta response
+SYNC(missing_posts, request_ids) <---------------
+SYNC(requested_posts) ---------->
+                                   Apply new posts to room-scoped feed
+```
+
+Why this approach:
+- reduces transfer size compared to full DB exchange
+- improves sync speed on unstable or low-throughput local links
+
+---
+
+## Data Model
+
+### SQLite Tables
+
 - `identity`
 - `posts`
 - `peers`
 - `rooms`
 
-Posts now store:
+### Post Entity (Core Fields)
+
 - `post_id`
 - `room_id`
 - `room_name`
@@ -100,45 +220,29 @@ Posts now store:
 - `hop_count`
 - `synced`
 
-## Running The App
-
-Requirements:
-- Flutter SDK
-- Android SDK / Android Studio
-- physical Android devices for Wi-Fi Direct testing
-
-Run:
-
-```bash
-flutter pub get
-flutter run
-```
-
-## Testing Notes
-
-For real device testing:
-- install the app on two Android phones
-- open `Nearby`
-- start Wi-Fi scan on both phones
-- connect one device to the other
-- create or join the same room
-- post in the room and verify sync
+---
 
 ## Current Limitations
 
-- Android-only networking path
-- Wi-Fi Direct still relies on the group-owner model underneath
-- room passwords are not encrypted transport/security boundaries
-- build/analyzer verification has not been fully rerun after the latest room changes
+- Native networking path is Android-focused for this build
+- Wi-Fi Direct behavior depends on group-owner mechanics underneath
+- Room password is an app-level access check, not end-to-end encryption
+- iOS/macOS/web targets exist as Flutter scaffolding but are not the primary P2P target
 
-## Key Files
+---
 
-- `lib/screens/feed_screen.dart`
-- `lib/screens/nearby_screen.dart`
-- `lib/providers/feed_provider.dart`
-- `lib/providers/room_provider.dart`
-- `lib/controllers/gossip_controller.dart`
-- `lib/db/database_helper.dart`
-- `android/app/src/main/kotlin/com/example/meshsocial/P2PManager.kt`
-- `android/app/src/main/kotlin/com/example/meshsocial/SocketServer.kt`
-- `android/app/src/main/kotlin/com/example/meshsocial/GossipEngine.kt`
+## Contributing
+
+Contributions are welcome. For meaningful PRs:
+
+1. Keep Flutter and Kotlin changes isolated by layer when possible.
+2. Preserve gossip protocol compatibility when modifying payload schema.
+3. Test with at least two real Android devices before submitting.
+
+---
+
+<div align="center">
+
+Built with Flutter + Kotlin for offline-first mesh social communication.
+
+</div>
