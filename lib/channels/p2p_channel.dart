@@ -54,4 +54,30 @@ class P2PChannel {
   static Future<void> sendDebugPing(String payload) async {
     await _channel.invokeMethod('sendDebugPing', {'payload': payload});
   }
+
+  static Future<void> sendFile({
+    required String path,
+    required String fileId,
+    required String fileName,
+    required int fileSize,
+    required String mimeType,
+    required String roomId,
+    required String roomName,
+    required String senderId,
+    required String senderName,
+    String deviceAddress = '',
+  }) async {
+    await _channel.invokeMethod('sendFile', {
+      'path': path,
+      'fileId': fileId,
+      'fileName': fileName,
+      'fileSize': fileSize,
+      'mimeType': mimeType,
+      'roomId': roomId,
+      'roomName': roomName,
+      'senderId': senderId,
+      'senderName': senderName,
+      'address': deviceAddress,
+    });
+  }
 }

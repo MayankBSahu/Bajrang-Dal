@@ -38,6 +38,21 @@ class MainActivity : FlutterActivity() {
                         val payload = call.argument<String>("payload") ?: "DEBUG_PING|unknown"
                         p2pManager.sendDebugPing(payload, result)
                     }
+                    "sendFile"          -> {
+                        p2pManager.sendFile(
+                            path = call.argument<String>("path") ?: "",
+                            fileId = call.argument<String>("fileId") ?: "",
+                            fileName = call.argument<String>("fileName") ?: "",
+                            fileSize = call.argument<Int>("fileSize") ?: 0,
+                            mimeType = call.argument<String>("mimeType") ?: "application/octet-stream",
+                            roomId = call.argument<String>("roomId") ?: "general",
+                            roomName = call.argument<String>("roomName") ?: "General",
+                            senderId = call.argument<String>("senderId") ?: "",
+                            senderName = call.argument<String>("senderName") ?: "",
+                            address = call.argument<String>("address") ?: "",
+                            result = result
+                        )
+                    }
                     else                 -> result.notImplemented()
                 }
             }

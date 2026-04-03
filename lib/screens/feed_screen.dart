@@ -1,16 +1,20 @@
 import 'package:flutter/foundation.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../channels/p2p_channel.dart';
 import '../models/post.dart';
 import '../models/room.dart';
+import '../models/shared_file.dart';
 import '../providers/feed_provider.dart';
 import '../providers/identity_provider.dart';
 import '../providers/mesh_debug_provider.dart';
 import '../providers/peer_provider.dart';
 import '../providers/room_provider.dart';
+import '../providers/shared_file_provider.dart';
 
 class FeedScreen extends StatefulWidget {
   const FeedScreen({super.key});
@@ -33,8 +37,10 @@ class _FeedScreenState extends State<FeedScreen> {
     final roomProvider = context.watch<RoomProvider>();
     final activeRoom = roomProvider.activeRoom;
     final posts = context.watch<FeedProvider>().posts;
+    final files = context.watch<SharedFileProvider>().files;
     final p2pConnected = context.watch<PeerProvider>().p2pConnected;
     final debug = context.watch<MeshDebugProvider>();
+    final roomIsEmpty = posts.isEmpty && files.isEmpty;
 
     if (activeRoom != null && _loadedRoomId != activeRoom.roomId) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _syncRoomFeed());
@@ -45,6 +51,11 @@ class _FeedScreenState extends State<FeedScreen> {
         title: const Text('MeshSocial'),
         centerTitle: true,
         actions: [
+          IconButton(
+            onPressed: activeRoom == null ? null : () => _pickAndSendFile(context, activeRoom),
+            icon: const Icon(Icons.attach_file),
+            tooltip: 'Share file',
+          ),
           IconButton(
             onPressed: () => _showJoinRoomDialog(context),
             icon: const Icon(Icons.lock_open),
@@ -129,19 +140,24 @@ class _FeedScreenState extends State<FeedScreen> {
           Expanded(
             child: activeRoom == null
                 ? const Center(child: CircularProgressIndicator())
-                : posts.isEmpty
+                : roomIsEmpty
                     ? _EmptyFeedState(
                         activeRoom: activeRoom,
                         p2pConnected: p2pConnected,
                       )
-                    : ListView.builder(
+                    : ListView(
                         padding: const EdgeInsets.fromLTRB(16, 16, 16, 112),
-                        itemCount: posts.length,
-                        itemBuilder: (context, index) => _PostCard(
-                          post: posts[index],
-                          isLocalAuthor: posts[index].authorId ==
-                              context.read<IdentityProvider>().identity?.peerId,
-                        ),
+                        children: [
+                          _FileShelf(files: files),
+                          const SizedBox(height: 14),
+                          ...posts.map(
+                            (post) => _PostCard(
+                              post: post,
+                              isLocalAuthor: post.authorId ==
+                                  context.read<IdentityProvider>().identity?.peerId,
+                            ),
+                          ),
+                        ],
                       ),
           ),
         ],
@@ -153,7 +169,71 @@ class _FeedScreenState extends State<FeedScreen> {
     final room = context.read<RoomProvider>().activeRoom;
     if (room == null) return;
     context.read<FeedProvider>().loadPosts(roomId: room.roomId);
+    context.read<SharedFileProvider>().loadFiles(roomId: room.roomId);
     _loadedRoomId = room.roomId;
+  }
+
+  Future<void> _pickAndSendFile(BuildContext context, Room room) async {
+    final identity = context.read<IdentityProvider>().identity;
+    if (identity == null) return;
+
+    final result = await FilePicker.platform.pickFiles(withData: false);
+    if (result == null || result.files.isEmpty) return;
+    final picked = result.files.single;
+    final path = picked.path;
+    if (path == null || path.isEmpty) return;
+
+    const maxBytes = 4 * 1024 * 1024;
+    if (picked.size > maxBytes) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('First version supports files up to 4 MB.')),
+      );
+      return;
+    }
+
+    final file = await context.read<SharedFileProvider>().addOutgoingFile(
+          roomId: room.roomId,
+          roomName: room.name,
+          senderId: identity.peerId,
+          senderName: identity.displayName,
+          sourcePath: path,
+          fileName: picked.name,
+          fileSize: picked.size,
+          mimeType: _guessMimeType(picked.name),
+        );
+
+    try {
+      await P2PChannel.sendFile(
+        path: path,
+        fileId: file.fileId,
+        fileName: file.fileName,
+        fileSize: file.fileSize,
+        mimeType: file.mimeType,
+        roomId: room.roomId,
+        roomName: room.name,
+        senderId: identity.peerId,
+        senderName: identity.displayName,
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Shared ${file.fileName} in ${room.name}.')),
+      );
+    } on PlatformException catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message ?? e.code)),
+      );
+    }
+  }
+
+  String _guessMimeType(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.txt')) return 'text/plain';
+    return 'application/octet-stream';
   }
 
   void _showPostDialog(BuildContext context, Room room) {
@@ -332,6 +412,98 @@ class _FeedScreenState extends State<FeedScreen> {
               Navigator.pop(ctx);
             },
             child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FileShelf extends StatelessWidget {
+  final List<SharedFile> files;
+
+  const _FileShelf({required this.files});
+
+  @override
+  Widget build(BuildContext context) {
+    if (files.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text('No files shared in this room yet.'),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Shared files',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 126,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: files.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (context, index) => _FileCard(file: files[index]),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FileCard extends StatelessWidget {
+  final SharedFile file;
+
+  const _FileCard({required this.file});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 220,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.insert_drive_file_outlined),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  file.fileName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '${file.fileSize ~/ 1024} KB',
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'By ${file.senderName}',
+            style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+          const Spacer(),
+          Text(
+            DateFormat('MMM d, HH:mm').format(file.createdAt),
+            style: const TextStyle(fontSize: 12),
           ),
         ],
       ),

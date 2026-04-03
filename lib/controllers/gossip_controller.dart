@@ -6,6 +6,7 @@ import '../providers/identity_provider.dart';
 import '../providers/mesh_debug_provider.dart';
 import '../providers/peer_provider.dart';
 import '../providers/room_provider.dart';
+import '../providers/shared_file_provider.dart';
 
 class GossipController {
   final BuildContext context;
@@ -128,6 +129,29 @@ class GossipController {
         final feed = context.read<FeedProvider>();
         await feed.applyPostsFromGossip(list);
         return null;
+
+      case 'incomingFile':
+        if (!context.mounted) return null;
+        final args = Map<String, dynamic>.from(call.arguments);
+        final roomId = args['roomId'] as String? ?? 'general';
+        final roomName = args['roomName'] as String? ?? 'General';
+        await context
+            .read<RoomProvider>()
+            .ensureRoomForPost(roomId: roomId, roomName: roomName);
+        await context.read<SharedFileProvider>().saveIncomingFile(
+              fileId: args['fileId'] as String? ?? '',
+              roomId: roomId,
+              roomName: roomName,
+              senderId: args['senderId'] as String? ?? '',
+              senderName: args['senderName'] as String? ?? 'Unknown',
+              fileName: args['fileName'] as String? ?? 'file',
+              fileSize: (args['fileSize'] as num?)?.toInt() ?? 0,
+              mimeType: args['mimeType'] as String? ?? 'application/octet-stream',
+              base64Data: args['base64Data'] as String? ?? '',
+              createdAt: DateTime.tryParse(args['createdAt'] as String? ?? '') ??
+                  DateTime.now(),
+            );
+        break;
 
       case 'getPeerId':
         if (!context.mounted) return null;

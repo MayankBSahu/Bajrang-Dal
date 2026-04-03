@@ -16,10 +16,17 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -27,6 +34,10 @@ class P2PManager(
     private val context: Context,
     messenger: BinaryMessenger
 ) {
+    companion object {
+        private const val MAX_SHARED_FILE_BYTES = 4 * 1024 * 1024
+    }
+
     private val TAG = "MeshSocial-P2PManager"
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gossipExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -336,6 +347,69 @@ class P2PManager(
         }
     }
 
+    fun sendFile(
+        path: String,
+        fileId: String,
+        fileName: String,
+        fileSize: Int,
+        mimeType: String,
+        roomId: String,
+        roomName: String,
+        senderId: String,
+        senderName: String,
+        address: String,
+        result: MethodChannel.Result
+    ) {
+        val targetPeerIds = resolveTargetPeerIds(address)
+        if (targetPeerIds.isEmpty()) {
+            result.error("NO_SOCKET", "No active mesh link.", null)
+            return
+        }
+
+        val sourceFile = File(path)
+        if (!sourceFile.exists() || !sourceFile.isFile) {
+            result.error("FILE_NOT_FOUND", "Selected file is missing.", null)
+            return
+        }
+
+        val actualFileSize = sourceFile.length()
+        if (actualFileSize <= 0L) {
+            result.error("EMPTY_FILE", "Selected file is empty.", null)
+            return
+        }
+        if (actualFileSize > MAX_SHARED_FILE_BYTES) {
+            result.error(
+                "FILE_TOO_LARGE",
+                "File exceeds the 4 MB transfer limit.",
+                null
+            )
+            return
+        }
+
+        gossipExecutor.execute {
+            try {
+                val payload = buildFileEnvelope(
+                    sourceFile = sourceFile,
+                    fileId = fileId,
+                    fileName = fileName,
+                    fileSize = actualFileSize.toInt(),
+                    mimeType = mimeType,
+                    roomId = roomId,
+                    roomName = roomName,
+                    senderId = senderId,
+                    senderName = senderName
+                )
+                sendPayloadToPeers(payload, targetPeerIds)
+                mainHandler.post { result.success(null) }
+            } catch (e: Exception) {
+                Log.e(TAG, "sendFile failed", e)
+                mainHandler.post {
+                    result.error("SEND_FILE_FAILED", e.message ?: "send file failed", null)
+                }
+            }
+        }
+    }
+
     private fun handleDiscoveredPeers(devices: Collection<WifiP2pDevice>) {
         discoveredPeers.clear()
         discoveredPeers.addAll(devices)
@@ -411,6 +485,7 @@ class P2PManager(
         when (GossipEngine.getEnvelopeType(payload)) {
             "hello" -> handleHelloEnvelope(sourcePeerId, payload)
             "sync" -> handleSyncEnvelope(sourcePeerId, payload)
+            "file" -> handleFileEnvelope(sourcePeerId, payload)
         }
     }
 
@@ -520,10 +595,55 @@ class P2PManager(
         }
     }
 
+    private fun handleFileEnvelope(sourcePeerId: String, payload: String) {
+        try {
+            val env = JSONObject(payload)
+            val fileId = env.optString("fileId")
+            val fileName = env.optString("fileName", "file")
+            val base64Data = env.optString("base64Data")
+            if (fileId.isBlank() || base64Data.isBlank()) {
+                Log.w(TAG, "Ignoring invalid file envelope from $sourcePeerId")
+                return
+            }
+
+            val args = mapOf(
+                "fileId" to fileId,
+                "roomId" to env.optString("roomId", "general"),
+                "roomName" to env.optString("roomName", "General"),
+                "senderId" to env.optString("senderId", ""),
+                "senderName" to env.optString("senderName", "Unknown"),
+                "fileName" to fileName,
+                "fileSize" to env.optInt("fileSize", 0),
+                "mimeType" to env.optString("mimeType", "application/octet-stream"),
+                "createdAt" to env.optString("createdAt", ""),
+                "base64Data" to base64Data
+            )
+
+            notifyFlutterMain("incomingFile", args)
+            if (isGroupOwnerTransport()) {
+                relayPayloadToOtherPeers(sourcePeerId, payload)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed parsing file envelope from $sourcePeerId", e)
+        }
+    }
+
     private fun relayHelloToOtherPeers(sourcePeerId: String) {
         val targetPeerIds = socketServer.getConnectedPeerIds().filterNot { it == sourcePeerId }
         if (targetPeerIds.isEmpty()) return
         scheduleHelloForPeers(targetPeerIds)
+    }
+
+    private fun relayPayloadToOtherPeers(sourcePeerId: String, payload: String) {
+        val targetPeerIds = socketServer.getConnectedPeerIds().filterNot { it == sourcePeerId }
+        if (targetPeerIds.isEmpty()) return
+        gossipExecutor.execute {
+            try {
+                sendPayloadToPeers(payload, targetPeerIds)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed relaying payload from $sourcePeerId", e)
+            }
+        }
     }
 
     private fun scheduleHelloForPeers(
@@ -585,6 +705,38 @@ class P2PManager(
         if (sentCount == 0 && lastError != null) {
             throw lastError as Exception
         }
+    }
+
+    private fun buildFileEnvelope(
+        sourceFile: File,
+        fileId: String,
+        fileName: String,
+        fileSize: Int,
+        mimeType: String,
+        roomId: String,
+        roomName: String,
+        senderId: String,
+        senderName: String
+    ): String {
+        val bytes = sourceFile.readBytes()
+        val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
+        return JSONObject().apply {
+            put("v", GossipEngine.PROTOCOL_VERSION)
+            put("type", "file")
+            put("fileId", fileId)
+            put("fileName", fileName)
+            put("fileSize", fileSize)
+            put("mimeType", mimeType)
+            put("roomId", roomId)
+            put("roomName", roomName)
+            put("senderId", senderId)
+            put("senderName", senderName)
+            put("createdAt", timestamp)
+            put("base64Data", base64Data)
+        }.toString()
     }
 
     private fun resolveTargetPeerIds(address: String): List<String> {

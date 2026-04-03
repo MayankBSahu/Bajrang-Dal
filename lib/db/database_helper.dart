@@ -4,6 +4,7 @@ import '../models/post.dart';
 import '../models/peer.dart';
 import '../models/identity.dart';
 import '../models/room.dart';
+import '../models/shared_file.dart';
 
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
@@ -21,7 +22,7 @@ class DatabaseHelper {
     final path = join(dbPath, fileName);
     return openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
     );
@@ -45,6 +46,22 @@ class DatabaseHelper {
         password    TEXT DEFAULT '',
         created_at  TEXT NOT NULL,
         joined_at   TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE shared_files (
+        file_id      TEXT PRIMARY KEY,
+        room_id      TEXT NOT NULL,
+        room_name    TEXT NOT NULL,
+        sender_id    TEXT NOT NULL,
+        sender_name  TEXT NOT NULL,
+        file_name    TEXT NOT NULL,
+        local_path   TEXT NOT NULL,
+        file_size    INTEGER DEFAULT 0,
+        mime_type    TEXT DEFAULT 'application/octet-stream',
+        created_at   TEXT NOT NULL,
+        is_outgoing  INTEGER DEFAULT 0
       )
     ''');
 
@@ -101,6 +118,23 @@ class DatabaseHelper {
       );
       await _ensureDefaultRoom(db);
     }
+    if (oldVersion < 4) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS shared_files (
+          file_id      TEXT PRIMARY KEY,
+          room_id      TEXT NOT NULL,
+          room_name    TEXT NOT NULL,
+          sender_id    TEXT NOT NULL,
+          sender_name  TEXT NOT NULL,
+          file_name    TEXT NOT NULL,
+          local_path   TEXT NOT NULL,
+          file_size    INTEGER DEFAULT 0,
+          mime_type    TEXT DEFAULT 'application/octet-stream',
+          created_at   TEXT NOT NULL,
+          is_outgoing  INTEGER DEFAULT 0
+        )
+      ''');
+    }
   }
 
   Future<void> _ensureDefaultRoom(Database db) async {
@@ -155,6 +189,27 @@ class DatabaseHelper {
       orderBy: 'created_at DESC',
     );
     return rows.map(Post.fromMap).toList();
+  }
+
+  // --- Shared Files ---
+  Future<void> insertSharedFile(SharedFile file) async {
+    final db = await database;
+    await db.insert(
+      'shared_files',
+      file.toMap(),
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  Future<List<SharedFile>> getFilesForRoom(String roomId) async {
+    final db = await database;
+    final rows = await db.query(
+      'shared_files',
+      where: 'room_id = ?',
+      whereArgs: [roomId],
+      orderBy: 'created_at DESC',
+    );
+    return rows.map(SharedFile.fromMap).toList();
   }
 
   Future<List<String>> getPostIds() async {
