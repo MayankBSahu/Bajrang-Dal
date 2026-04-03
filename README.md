@@ -246,3 +246,6 @@ Contributions are welcome. For meaningful PRs:
 Built with Flutter + Kotlin for offline-first mesh social communication.
 
 </div>
+
+## Presentation and Demonstration
+Drive link : 'https://drive.google.com/file/d/1IVu7edgDodKwrSB3pxdHbEE8NlxCHGzx/view?usp=drive_link'
