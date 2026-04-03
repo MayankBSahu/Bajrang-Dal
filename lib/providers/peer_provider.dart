@@ -14,15 +14,19 @@ class PeerProvider extends ChangeNotifier {
   bool? get isGroupOwner => _isGroupOwner;
   String? _groupOwnerHost;
   String? get groupOwnerHost => _groupOwnerHost;
+  int _peerCount = 0;
+  int get peerCount => _peerCount;
 
   void setP2pConnection({
     required bool connected,
     bool? isGroupOwner,
     String? groupOwnerHost,
+    int? peerCount,
   }) {
     _p2pConnected = connected;
     _isGroupOwner = isGroupOwner;
     _groupOwnerHost = groupOwnerHost;
+    _peerCount = peerCount ?? _peerCount;
     notifyListeners();
   }
 
