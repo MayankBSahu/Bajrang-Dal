@@ -31,8 +31,6 @@ class P2PManager(
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gossipExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    // Wi-Fi Direct often emits multiple connection change broadcasts while negotiating.
-    // Debounce groupFormed=false so we do not close the TCP server or client prematurely.
     @Volatile
     private var lastGroupFormedAtMs: Long = 0L
     private val groupFormDebounceMs = 1500L
@@ -77,10 +75,8 @@ class P2PManager(
         }
     )
 
-    /** Flutter UI + DB I/O; native drives gossip protocol via [GossipEngine]. */
     private val eventChannel = MethodChannel(messenger, "meshsocial/p2p")
 
-    // WiFi Direct components
     private val wifiP2pManager: WifiP2pManager? by lazy(LazyThreadSafetyMode.NONE) {
         context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager?
     }
@@ -88,13 +84,11 @@ class P2PManager(
         wifiP2pManager?.initialize(context, Looper.getMainLooper(), null)
     }
 
-    // State tracking
     private var isDiscovering = false
     private var discoveredPeers = mutableListOf<WifiP2pDevice>()
     private var connectionInfo: WifiP2pInfo? = null
     private var thisDevice: WifiP2pDevice? = null
 
-    // Broadcast receiver for WiFi Direct events
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -125,7 +119,6 @@ class P2PManager(
         }
     }
 
-    // Intent filter for the broadcast receiver
     private val intentFilter = IntentFilter().apply {
         addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
         addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
@@ -137,20 +130,6 @@ class P2PManager(
         context.registerReceiver(receiver, intentFilter)
     }
 
-    private fun hasWifiDirectDiscoveryPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
     fun startDiscovery(result: MethodChannel.Result) {
         val mgr = wifiP2pManager
         val ch = channel
@@ -158,7 +137,6 @@ class P2PManager(
             result.error("NO_P2P", "WiFi Direct is not available on this device", null)
             return
         }
-
         if (!hasWifiDirectDiscoveryPermission()) {
             result.error(
                 "PERMISSION_DENIED",
@@ -167,23 +145,22 @@ class P2PManager(
             )
             return
         }
-
         if (isDiscovering) {
             result.success(null)
             return
         }
 
+        discoveredPeers.clear()
+        notifyFlutter("clearDiscoveredPeers", emptyMap())
         mgr.discoverPeers(ch, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                Log.d(TAG, "Peer discovery started successfully")
                 isDiscovering = true
                 notifyFlutter("discoveryStateChanged", mapOf("isDiscovering" to true))
                 result.success(null)
             }
 
             override fun onFailure(reason: Int) {
-                Log.e(TAG, "Failed to start peer discovery: $reason")
-                result.error("DISCOVERY_FAILED", "Failed to start peer discovery: $reason", null)
+                result.error("DISCOVERY_FAILED", "Failed to start WiFi Direct discovery: $reason", null)
             }
         })
     }
@@ -196,15 +173,15 @@ class P2PManager(
 
         wifiP2pManager?.stopPeerDiscovery(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                Log.d(TAG, "Peer discovery stopped successfully")
                 isDiscovering = false
+                discoveredPeers.clear()
+                notifyFlutter("clearDiscoveredPeers", emptyMap())
                 notifyFlutter("discoveryStateChanged", mapOf("isDiscovering" to false))
                 result.success(null)
             }
 
             override fun onFailure(reason: Int) {
-                Log.e(TAG, "Failed to stop peer discovery: $reason")
-                result.error("STOP_DISCOVERY_FAILED", "Failed to stop peer discovery: $reason", null)
+                result.error("STOP_DISCOVERY_FAILED", "Failed to stop WiFi Direct discovery: $reason", null)
             }
         })
     }
@@ -238,11 +215,7 @@ class P2PManager(
 
             mainHandler.post {
                 if (device == null) {
-                    result.error(
-                        "DEVICE_NOT_FOUND",
-                        "This phone does not see that peer over WiFi Direct. On both phones: open Nearby, tap Scan, wait until the other device appears, then tap Connect.",
-                        null
-                    )
+                    result.error("DEVICE_NOT_FOUND", "This phone does not see that peer over WiFi Direct.", null)
                     return@post
                 }
 
@@ -253,29 +226,19 @@ class P2PManager(
 
                 mgr.connect(ch, config, object : WifiP2pManager.ActionListener {
                     override fun onSuccess() {
-                        Log.d(TAG, "Connection to ${device.deviceAddress} initiated")
-                        mainHandler.post { result.success(null) }
+                        result.success(null)
                     }
 
                     override fun onFailure(reason: Int) {
-                        val msg = connectFailureMessage(reason)
-                        Log.e(TAG, "connect failed reason=$reason: $msg")
-                        mainHandler.post {
-                            result.error("CONNECTION_FAILED", msg, mapOf("reason" to reason))
-                        }
+                        result.error(
+                            "CONNECTION_FAILED",
+                            connectFailureMessage(reason),
+                            mapOf("reason" to reason)
+                        )
                     }
                 })
             }
         }
-    }
-
-    private fun connectFailureMessage(reason: Int): String = when (reason) {
-        WifiP2pManager.P2P_UNSUPPORTED ->
-            "WiFi Direct is not available. Turn WiFi on and try again."
-        WifiP2pManager.BUSY ->
-            "WiFi Direct is busy. Disconnect any existing link, wait a few seconds, then try again on both phones."
-        else ->
-            "Could not connect (error $reason). Try scanning again on both phones and accept the WiFi Direct invite if it pops up."
     }
 
     fun disconnect(result: MethodChannel.Result) {
@@ -284,15 +247,15 @@ class P2PManager(
         wifiGroupFormed = false
         wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
-                Log.d(TAG, "Disconnected successfully")
                 connectionInfo = null
                 notifyTransportState(0)
                 result.success(null)
             }
 
             override fun onFailure(reason: Int) {
-                Log.e(TAG, "Failed to disconnect: $reason")
-                result.error("DISCONNECT_FAILED", "Failed to disconnect: $reason", null)
+                connectionInfo = null
+                notifyTransportState(0)
+                result.success(null)
             }
         })
     }
@@ -321,7 +284,6 @@ class P2PManager(
         result.success(thisDevice?.deviceAddress)
     }
 
-    /** Opens system WiFi UI so the user can find WiFi Direct / pending invites (OEM-dependent). */
     fun openWifiSettings(result: MethodChannel.Result) {
         val newTask = Intent.FLAG_ACTIVITY_NEW_TASK
         val candidates = buildList {
@@ -336,16 +298,47 @@ class P2PManager(
                 result.success(null)
                 return
             } catch (_: Exception) {
-                // try next
             }
         }
         result.error("INTENT_FAILED", "Could not open WiFi settings", null)
     }
 
+    fun pushGossipSync(result: MethodChannel.Result) {
+        val targetPeerIds = resolveTargetPeerIds(address = "")
+        if (targetPeerIds.isEmpty()) {
+            result.error("NO_SOCKET", "No active mesh link. Connect to a peer on the Nearby tab first.", null)
+            return
+        }
+
+        scheduleHelloForPeers(
+            peerIds = targetPeerIds,
+            onSuccess = { mainHandler.post { result.success(null) } },
+            onFailure = { error ->
+                mainHandler.post { result.error("PUSH_FAILED", error.message, null) }
+            }
+        )
+    }
+
+    fun sendDebugPing(payload: String, result: MethodChannel.Result) {
+        val targetPeerIds = resolveTargetPeerIds(address = "")
+        if (targetPeerIds.isEmpty()) {
+            result.error("NO_SOCKET", "No active mesh link.", null)
+            return
+        }
+
+        gossipExecutor.execute {
+            try {
+                sendPayloadToPeers(payload, targetPeerIds)
+                mainHandler.post { result.success(null) }
+            } catch (e: Exception) {
+                mainHandler.post { result.error("DEBUG_PING_FAILED", e.message, null) }
+            }
+        }
+    }
+
     private fun handleDiscoveredPeers(devices: Collection<WifiP2pDevice>) {
         discoveredPeers.clear()
         discoveredPeers.addAll(devices)
-
         val peersList = devices.map { device ->
             mapOf(
                 "deviceName" to device.deviceName,
@@ -354,7 +347,6 @@ class P2PManager(
                 "isGroupOwner" to device.isGroupOwner
             )
         }
-
         notifyFlutter("peersDiscovered", mapOf("peers" to peersList))
     }
 
@@ -370,7 +362,6 @@ class P2PManager(
 
                 mainHandler.postDelayed({
                     if (pendingStopToken != myToken) return@postDelayed
-
                     val elapsed2 = System.currentTimeMillis() - lastGroupFormedAtMs
                     if (elapsed2 >= groupFormDebounceMs) {
                         transportStartPending = false
@@ -404,51 +395,11 @@ class P2PManager(
             socketServer.startAsGroupOwner()
             return
         }
-
         if (groupOwnerHost.isNotEmpty()) {
             socketServer.startAsClient(groupOwnerHost)
         } else {
             transportStartPending = false
-            Log.e(TAG, "Group owner address missing")
             notifyFlutterMain("meshDebugError", mapOf("message" to "Group owner address missing"))
-        }
-    }
-
-    /**
-     * Flutter calls this after creating a post while the gossip socket is up.
-     */
-    fun pushGossipSync(result: MethodChannel.Result) {
-        val targetPeerIds = resolveTargetPeerIds(address = "")
-        if (targetPeerIds.isEmpty()) {
-            result.error("NO_SOCKET", "No active mesh link. Connect to a peer on the Nearby tab first.", null)
-            return
-        }
-
-        scheduleHelloForPeers(
-            peerIds = targetPeerIds,
-            onSuccess = { mainHandler.post { result.success(null) } },
-            onFailure = { error ->
-                mainHandler.post { result.error("PUSH_FAILED", error.message, null) }
-            }
-        )
-    }
-
-    /** Ground test: send a raw debug marker over the open TCP gossip socket. */
-    fun sendDebugPing(payload: String, result: MethodChannel.Result) {
-        val targetPeerIds = resolveTargetPeerIds(address = "")
-        if (targetPeerIds.isEmpty()) {
-            result.error("NO_SOCKET", "No active mesh link.", null)
-            return
-        }
-
-        gossipExecutor.execute {
-            try {
-                sendPayloadToPeers(payload, targetPeerIds)
-                mainHandler.post { result.success(null) }
-            } catch (e: Exception) {
-                Log.e(TAG, "sendDebugPing failed", e)
-                mainHandler.post { result.error("DEBUG_PING_FAILED", e.message, null) }
-            }
         }
     }
 
@@ -457,7 +408,6 @@ class P2PManager(
             notifyFlutter("meshDebugPingReceived", mapOf("payload" to payload))
             return
         }
-
         when (GossipEngine.getEnvelopeType(payload)) {
             "hello" -> handleHelloEnvelope(sourcePeerId, payload)
             "sync" -> handleSyncEnvelope(sourcePeerId, payload)
@@ -475,12 +425,14 @@ class P2PManager(
                         gossipExecutor.execute {
                             val map = result as? Map<*, *> ?: return@execute
                             val peerId = map["peerId"] as? String ?: return@execute
-                            val missingPosts = map["missingPosts"]
-                            val requestIds = map["requestIds"]
-                            val syncEnv = GossipEngine.buildSyncEnvelope(peerId, missingPosts, requestIds)
+                            val syncEnv = GossipEngine.buildSyncEnvelope(
+                                peerId,
+                                map["missingPosts"],
+                                map["requestIds"]
+                            )
                             try {
                                 socketServer.sendPayloadSync(syncEnv, sourcePeerId)
-                                val count = (missingPosts as? List<*>)?.size ?: 0
+                                val count = (map["missingPosts"] as? List<*>)?.size ?: 0
                                 notifyFlutterMain("meshDebugPushSent", mapOf("postCount" to count))
                             } catch (e: Exception) {
                                 Log.e(TAG, "Failed sending SYNC to $sourcePeerId", e)
@@ -489,7 +441,6 @@ class P2PManager(
                     }
 
                     override fun error(code: String, msg: String?, details: Any?) {}
-
                     override fun notImplemented() {}
                 }
             )
@@ -508,7 +459,6 @@ class P2PManager(
                         if (parsedPosts.isNotEmpty()) {
                             applyIncomingPosts(sourcePeerId, parsedPosts)
                         }
-
                         if (requestIds.isNotEmpty()) {
                             fulfillSyncRequests(sourcePeerId, requestIds)
                         }
@@ -516,7 +466,6 @@ class P2PManager(
                 }
 
                 override fun error(code: String, msg: String?, details: Any?) {}
-
                 override fun notImplemented() {}
             })
         }
@@ -539,7 +488,6 @@ class P2PManager(
                     }
 
                     override fun error(code: String, msg: String?, details: Any?) {}
-
                     override fun notImplemented() {}
                 }
             )
@@ -556,8 +504,7 @@ class P2PManager(
                         gossipExecutor.execute {
                             val map = reqResult as? Map<*, *> ?: return@execute
                             val peerId = map["peerId"] as? String ?: return@execute
-                            val missingPosts = map["missingPosts"]
-                            val reqEnv = GossipEngine.buildSyncEnvelope(peerId, missingPosts, null)
+                            val reqEnv = GossipEngine.buildSyncEnvelope(peerId, map["missingPosts"], null)
                             try {
                                 socketServer.sendPayloadSync(reqEnv, sourcePeerId)
                             } catch (e: Exception) {
@@ -567,7 +514,6 @@ class P2PManager(
                     }
 
                     override fun error(code: String, msg: String?, details: Any?) {}
-
                     override fun notImplemented() {}
                 }
             )
@@ -590,7 +536,6 @@ class P2PManager(
             onSuccess?.invoke()
             return
         }
-
         mainHandler.post {
             eventChannel.invokeMethod("getGossipHelloExport", null, object : MethodChannel.Result {
                 override fun success(result: Any?) {
@@ -605,13 +550,9 @@ class P2PManager(
                         }
                         val hello = GossipEngine.buildHelloEnvelope(peerId, map["postIds"])
                         try {
-                            val sentCount = sendPayloadToPeers(hello, distinctPeerIds)
+                            sendPayloadToPeers(hello, distinctPeerIds)
                             notifyFlutterMain("meshDebugPushSent", mapOf("postCount" to 0))
-                            if (sentCount == 0) {
-                                onFailure?.invoke(IllegalStateException("No mesh peers accepted the HELLO"))
-                            } else {
-                                onSuccess?.invoke()
-                            }
+                            onSuccess?.invoke()
                         } catch (e: Exception) {
                             onFailure?.invoke(e)
                         }
@@ -629,10 +570,9 @@ class P2PManager(
         }
     }
 
-    private fun sendPayloadToPeers(payload: String, peerIds: List<String>): Int {
+    private fun sendPayloadToPeers(payload: String, peerIds: List<String>) {
         var sentCount = 0
         var lastError: Exception? = null
-
         peerIds.forEach { peerId ->
             try {
                 socketServer.sendPayloadSync(payload, peerId)
@@ -642,28 +582,42 @@ class P2PManager(
                 Log.e(TAG, "Failed sending payload to $peerId", e)
             }
         }
-
         if (sentCount == 0 && lastError != null) {
             throw lastError as Exception
         }
-
-        return sentCount
     }
 
     private fun resolveTargetPeerIds(address: String): List<String> {
         val connectedPeerIds = socketServer.getConnectedPeerIds()
         if (connectedPeerIds.isEmpty()) return emptyList()
-
         val trimmedAddress = address.trim()
         if (trimmedAddress.isNotEmpty()) {
             return connectedPeerIds.filter { it == trimmedAddress }
         }
+        return if (isGroupOwnerTransport()) connectedPeerIds else connectedPeerIds.take(1)
+    }
 
-        return if (isGroupOwnerTransport()) {
-            connectedPeerIds
+    private fun hasWifiDirectDiscoveryPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED
         } else {
-            connectedPeerIds.take(1)
+            ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    private fun connectFailureMessage(reason: Int): String = when (reason) {
+        WifiP2pManager.P2P_UNSUPPORTED ->
+            "WiFi Direct is not available. Turn WiFi on and try again."
+        WifiP2pManager.BUSY ->
+            "WiFi Direct is busy. Disconnect any existing link, wait a few seconds, then try again."
+        else ->
+            "Could not connect over WiFi Direct (error $reason)."
     }
 
     private fun isGroupOwnerTransport(): Boolean {
@@ -683,12 +637,10 @@ class P2PManager(
         )
     }
 
-    /** Always hop to main: Flutter method channel is unsafe from binder / WiFi P2P threads. */
     private fun notifyFlutterMain(method: String, args: Map<String, Any>) {
         notifyFlutter(method, args)
     }
 
-    // Called internally when peer events happen; pushes to Flutter on the main thread only.
     private fun notifyFlutter(method: String, args: Map<String, Any>) {
         mainHandler.post {
             try {
@@ -699,7 +651,6 @@ class P2PManager(
         }
     }
 
-    // Clean up resources
     fun cleanup() {
         transportStartPending = false
         socketServer.stop()

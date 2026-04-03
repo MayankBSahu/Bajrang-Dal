@@ -23,6 +23,10 @@ class GossipController {
         context.read<PeerProvider>().setDiscoveryState(isDiscovering);
         break;
 
+      case 'clearDiscoveredPeers':
+        context.read<PeerProvider>().clearDiscoveredPeers();
+        break;
+
       case 'peersDiscovered':
         final List<dynamic> peersData = call.arguments['peers'];
         context.read<PeerProvider>().handlePeersDiscovered(

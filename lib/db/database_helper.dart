@@ -18,7 +18,12 @@ class DatabaseHelper {
   Future<Database> _initDB(String fileName) async {
     final dbPath = await getDatabasesPath();
     final path = join(dbPath, fileName);
-    return openDatabase(path, version: 1, onCreate: _createDB);
+    return openDatabase(
+      path,
+      version: 2,
+      onCreate: _createDB,
+      onUpgrade: _upgradeDB,
+    );
   }
 
   Future _createDB(Database db, int version) async {
@@ -48,10 +53,19 @@ class DatabaseHelper {
         peer_id        TEXT PRIMARY KEY,
         display_name   TEXT NOT NULL,
         device_address TEXT NOT NULL,
+        transport      TEXT DEFAULT 'wifiDirect',
         status         TEXT DEFAULT 'discovered',
         last_seen      TEXT NOT NULL
       )
     ''');
+  }
+
+  Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute(
+        "ALTER TABLE peers ADD COLUMN transport TEXT DEFAULT 'wifiDirect'",
+      );
+    }
   }
 
   // --- Identity ---
