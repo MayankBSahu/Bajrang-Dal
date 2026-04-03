@@ -25,8 +25,10 @@ class P2PChannel {
     await _channel.invokeMethod('disconnect');
   }
 
-  static Future<void> sendGossipPayload(
-      String deviceAddress, String jsonPayload) async {
+  /// Sends a UTF-8 JSON payload over the active Wi‑Fi Direct gossip socket.
+  /// [deviceAddress] is reserved for future multi-peer routing; native may ignore it.
+  static Future<void> sendGossipPayload(String jsonPayload,
+      {String deviceAddress = ''}) async {
     await _channel.invokeMethod('sendGossipPayload', {
       'address': deviceAddress,
       'payload': jsonPayload,
@@ -35,5 +37,21 @@ class P2PChannel {
 
   static Future<String?> getDeviceAddress() async {
     return await _channel.invokeMethod<String>('getDeviceAddress');
+  }
+
+  /// System Wi‑Fi screen (user may find Wi‑Fi Direct / invites there on some phones).
+  static Future<void> openWifiSettings() async {
+    await _channel.invokeMethod('openWifiSettings');
+  }
+
+  /// Push current posts to the peer over the open gossip socket (call after creating a post).
+  static Future<void> pushGossipSync() async {
+    await _channel.invokeMethod('pushGossipSync');
+  }
+
+  /// Ground test: send a raw debug marker over the gossip TCP socket.
+  /// The other side will report receipt without applying to the feed/DB.
+  static Future<void> sendDebugPing(String payload) async {
+    await _channel.invokeMethod('sendDebugPing', {'payload': payload});
   }
 }
