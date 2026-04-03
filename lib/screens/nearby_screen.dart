@@ -59,53 +59,6 @@ Future<void> _toggleNearbyScan(BuildContext context) async {
   }
 }
 
-void _showWifiDirectInviteHelpDialog(BuildContext context) {
-  showDialog<void>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Where to tap Accept'),
-      content: SingleChildScrollView(
-        child: Text(
-          'Android usually does not show an Accept button inside MeshSocial.\n\n'
-          'On the other phone, try in order:\n\n'
-          '1) Swipe down from the top — check notifications for '
-          '“Wi‑Fi Direct”, “P2P”, or “Invitation”. Tap it, then Accept.\n\n'
-          '2) Open Settings → Wi‑Fi (or Network & internet). Use the menu (⋮) '
-          'or look for “Wi‑Fi Direct”, “Direct”, or “More” — some brands hide '
-          'the invite only there.\n\n'
-          'Keep Scan running on BOTH phones until you see the green “P2P link up” '
-          'message here.',
-          style: TextStyle(
-            fontSize: 14,
-            height: 1.35,
-            color: Theme.of(ctx).colorScheme.onSurface,
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () async {
-            Navigator.pop(ctx);
-            try {
-              await P2PChannel.openWifiSettings();
-            } on PlatformException {
-              if (ctx.mounted) {
-                ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
-                  const SnackBar(content: Text('Could not open Wi‑Fi settings')),
-                );
-              }
-            }
-          },
-          child: const Text('Open Wi‑Fi settings'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('OK'),
-        ),
-      ],
-    ),
-  );
-}
 
 Future<void> _connectToPeer(BuildContext context, String deviceAddress) async {
   if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
@@ -130,7 +83,18 @@ Future<void> _connectToPeer(BuildContext context, String deviceAddress) async {
   try {
     await P2PChannel.connectToPeer(deviceAddress);
     if (!context.mounted) return;
-    _showWifiDirectInviteHelpDialog(context);
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Invite sent! The other phone must accept the prompt (check notifications or Wi‑Fi settings).'),
+        duration: const Duration(seconds: 8),
+        action: SnackBarAction(
+          label: 'Open Wi‑Fi',
+          onPressed: () => P2PChannel.openWifiSettings(),
+        ),
+      ),
+    );
+
   } on PlatformException catch (e) {
     messenger?.showSnackBar(
       SnackBar(
@@ -256,9 +220,9 @@ class NearbyScreen extends StatelessWidget {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'After you tap Connect, the other phone won’t see anything '
-                        'inside this app — they must Accept from the notification '
-                        'shade or Wi‑Fi settings (Android decides). Keep Scan ON on both phones.',
+                        'After you tap Connect, an invite will be sent. The other phone '
+                        'must Accept it from their notifications or Wi‑Fi settings. '
+                        'Keep Scan ON on both phones until connected.',
                         style: TextStyle(
                           fontSize: 12.5,
                           height: 1.3,

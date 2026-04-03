@@ -43,8 +43,6 @@ class P2PManager(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gossipExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val gossipReadExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val gossipStopped = AtomicBoolean(false)
 
     // Wi‑Fi Direct often emits multiple connection change broadcasts while negotiating.
     // Debounce groupFormed=false so we don't close the TCP socket prematurely.
@@ -54,12 +52,21 @@ class P2PManager(
 
     @Volatile
     private var pendingStopToken: Long = 0L
-
-    private var gossipServerSocket: ServerSocket? = null
-    private var gossipSocket: Socket? = null
-    private var gossipOut: DataOutputStream? = null
-    private val gossipSendLock = Any()
     
+    @Volatile
+    private var transportStartPending = false
+    
+    private val socketServer = SocketServer(
+        onPayloadReceived = { payload -> handleGossipPayloadFromPeer(payload) },
+        onTransportReady = {
+            notifyFlutterMain("gossipTransportReady", emptyMap())
+            scheduleInitialGossipSync()
+        },
+        onTransportError = { err ->
+            notifyFlutterMain("meshDebugError", mapOf("message" to err))
+        }
+    )
+
     /** Flutter UI + DB I/O; native drives gossip protocol via [GossipEngine]. */
     private val eventChannel = MethodChannel(messenger, "meshsocial/p2p")
 
@@ -120,7 +127,6 @@ class P2PManager(
     }
     
     init {
-        // Register the broadcast receiver
         context.registerReceiver(receiver, intentFilter)
     }
     
@@ -196,11 +202,6 @@ class P2PManager(
         })
     }
     
-    /**
-     * Resolves the peer via [WifiP2pManager.requestPeers] first. Flutter’s list can stay populated
-     * after Scan stops while our in-memory [discoveredPeers] was cleared — that used to make
-     * Connect a silent no-op ([DEVICE_NOT_FOUND]).
-     */
     fun connectToPeer(address: String, result: MethodChannel.Result) {
         val mgr = wifiP2pManager
         val ch = channel
@@ -273,7 +274,7 @@ class P2PManager(
     }
     
     fun disconnect(result: MethodChannel.Result) {
-        stopGossipTransport()
+        socketServer.stop()
         wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 Log.d(TAG, "Disconnected successfully")
@@ -290,13 +291,13 @@ class P2PManager(
     }
     
     fun sendGossipPayload(address: String, payload: String, result: MethodChannel.Result) {
-        if (gossipOut == null) {
+        if (!socketServer.isConnected()) {
             result.error("NO_SOCKET", "Gossip transport is not connected", null)
             return
         }
         gossipExecutor.execute {
             try {
-                sendGossipPayloadInternal(payload)
+                socketServer.sendPayloadSync(payload)
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 Log.e(TAG, "sendGossipPayload failed", e)
@@ -304,20 +305,6 @@ class P2PManager(
                     result.error("SEND_FAILED", e.message ?: "send failed", null)
                 }
             }
-        }
-    }
-
-    @Throws(IOException::class)
-    private fun sendGossipPayloadInternal(payload: String) {
-        val out = gossipOut ?: throw IOException("Gossip transport is not connected")
-        val bytes = payload.toByteArray(Charsets.UTF_8)
-        if (bytes.size > MAX_PAYLOAD_BYTES) {
-            throw IOException("Payload exceeds limit")
-        }
-        synchronized(gossipSendLock) {
-            out.writeInt(bytes.size)
-            out.write(bytes)
-            out.flush()
         }
     }
     
@@ -380,8 +367,8 @@ class P2PManager(
                     if (pendingStopToken != myToken) return@postDelayed
 
                     val elapsed2 = System.currentTimeMillis() - lastGroupFormedAtMs
-                    if (elapsed2 >= GROUP_FORM_DEBOUNCE_MS && gossipOut != null) {
-                        stopGossipTransport()
+                    if (elapsed2 >= GROUP_FORM_DEBOUNCE_MS && socketServer.isConnected()) {
+                        socketServer.stop()
                         connectionInfo = null
                         notifyFlutter("connectionStateChanged", mapOf("isConnected" to false))
                     }
@@ -405,111 +392,24 @@ class P2PManager(
                 )
             )
 
-            // Only start once; if we restart while sockets exist we may close the
-            // active TCP stream and the next send will fail (Broken pipe).
-            if (gossipOut == null && gossipSocket == null) {
+            if (!socketServer.isConnected() && !transportStartPending) {
+                transportStartPending = true
                 startGossipTransport(isGroupOwner, groupOwnerAddress)
             }
         }
     }
 
     private fun startGossipTransport(isGroupOwner: Boolean, groupOwnerHost: String) {
-        gossipStopped.set(false)
-        gossipExecutor.execute {
-            try {
-                closeGossipSocketsQuietly()
-                if (isGroupOwner) {
-                    val server = ServerSocket()
-                    server.reuseAddress = true
-                    server.bind(InetSocketAddress(GOSSIP_PORT))
-                    gossipServerSocket = server
-                    Log.d(TAG, "Gossip server listening on port $GOSSIP_PORT")
-                    val client = server.accept()
-                    if (gossipStopped.get()) {
-                        client.close()
-                        return@execute
-                    }
-                    gossipSocket = client
-                    gossipOut = DataOutputStream(client.getOutputStream())
-                    notifyFlutterMain("gossipTransportReady", emptyMap())
-                    scheduleInitialGossipSync()
-                    gossipReadExecutor.execute { startReadLoop(client) }
-                } else {
-                    if (groupOwnerHost.isEmpty()) {
-                        Log.e(TAG, "Group owner address missing")
-                        return@execute
-                    }
-                    var socket: Socket? = null
-                    for (attempt in 0 until 25) {
-                        if (gossipStopped.get()) return@execute
-                        try {
-                            val s = Socket()
-                            s.tcpNoDelay = true
-                            s.connect(InetSocketAddress(groupOwnerHost, GOSSIP_PORT), 4000)
-                            socket = s
-                            break
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Connect attempt ${attempt + 1} failed: ${e.message}")
-                            Thread.sleep(350)
-                        }
-                    }
-                    val connected = socket ?: run {
-                        Log.e(TAG, "Client could not connect to group owner $groupOwnerHost")
-                        return@execute
-                    }
-                    gossipSocket = connected
-                    gossipOut = DataOutputStream(connected.getOutputStream())
-                    notifyFlutterMain("gossipTransportReady", emptyMap())
-                    scheduleInitialGossipSync()
-                    gossipReadExecutor.execute { startReadLoop(connected) }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Gossip transport error", e)
+        transportStartPending = false
+        if (isGroupOwner) {
+            socketServer.startAsGroupOwner()
+        } else {
+            if (groupOwnerHost.isNotEmpty()) {
+                socketServer.startAsClient(groupOwnerHost)
+            } else {
+                Log.e(TAG, "Group owner address missing")
             }
         }
-    }
-
-    private fun startReadLoop(socket: Socket) {
-        val dis = DataInputStream(socket.getInputStream())
-        val buf = ByteArray(MAX_PAYLOAD_BYTES)
-        while (!gossipStopped.get() && !socket.isClosed) {
-            try {
-                val len = dis.readInt()
-                if (len < 0 || len > MAX_PAYLOAD_BYTES) {
-                    Log.e(TAG, "Invalid gossip frame length: $len")
-                    break
-                }
-                dis.readFully(buf, 0, len)
-                val payload = String(buf, 0, len, Charsets.UTF_8)
-                handleGossipPayloadFromPeer(payload)
-            } catch (e: IOException) {
-                if (!gossipStopped.get()) {
-                    Log.d(TAG, "Gossip read loop ended: ${e.message}")
-                    notifyFlutterMain(
-                        "meshDebugError",
-                        mapOf("message" to ("Gossip read loop ended: " + (e.message ?: "unknown")))
-                    )
-                }
-                break
-            }
-        }
-    }
-
-    private fun stopGossipTransport() {
-        gossipStopped.set(true)
-        closeGossipSocketsQuietly()
-    }
-
-    private fun closeGossipSocketsQuietly() {
-        try {
-            gossipOut = null
-            gossipSocket?.close()
-        } catch (_: Exception) { }
-        gossipSocket = null
-        try {
-            gossipServerSocket?.close()
-        } catch (_: Exception) { }
-        gossipServerSocket = null
     }
 
     /** Always hop to main: Flutter method channel is unsafe from binder / Wi‑Fi P2P threads. */
@@ -519,56 +419,52 @@ class P2PManager(
 
     private fun scheduleInitialGossipSync() {
         mainHandler.post {
-            eventChannel.invokeMethod("getGossipExport", null, object : MethodChannel.Result {
+            eventChannel.invokeMethod("getGossipHelloExport", null, object : MethodChannel.Result {
                 override fun success(result: Any?) {
                     gossipExecutor.execute {
-                        val err = sendSyncFromExport(result)
-                        if (err != null) Log.e(TAG, "initial gossip sync failed", err)
+                        val map = result as? Map<*, *> ?: return@execute
+                        val peerId = map["peerId"] as? String ?: return@execute
+                        val hello = GossipEngine.buildHelloEnvelope(peerId, map["postIds"])
+                        try {
+                            socketServer.sendPayloadSync(hello)
+                            notifyFlutterMain("meshDebugPushSent", mapOf("postCount" to 0))
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed sending HELLO", e)
+                        }
                     }
                 }
-
-                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                    Log.e(TAG, "getGossipExport failed: $errorMessage")
-                }
-
-                override fun notImplemented() {
-                    Log.e(TAG, "getGossipExport not implemented in Dart")
-                }
+                override fun error(code: String, msg: String?, details: Any?) {}
+                override fun notImplemented() {}
             })
         }
     }
 
     /**
      * Flutter calls this after creating a post while the gossip socket is up.
-     * Without it, only the transport-ready snapshot was exchanged — new posts never reached the peer.
      */
     fun pushGossipSync(result: MethodChannel.Result) {
-        if (gossipOut == null) {
-            result.error(
-                "NO_SOCKET",
-                "No active mesh link. Connect to a peer on the Nearby tab first.",
-                null
-            )
+        if (!socketServer.isConnected()) {
+            result.error("NO_SOCKET", "No active mesh link. Connect to a peer on the Nearby tab first.", null)
             return
         }
         mainHandler.post {
-            eventChannel.invokeMethod("getGossipExport", null, object : MethodChannel.Result {
+            eventChannel.invokeMethod("getGossipHelloExport", null, object : MethodChannel.Result {
                 override fun success(export: Any?) {
                     gossipExecutor.execute {
-                        val err = sendSyncFromExport(export)
-                        mainHandler.post {
-                            if (err == null) result.success(null)
-                            else result.error("PUSH_FAILED", err.message ?: "push failed", null)
+                        val map = export as? Map<*, *> ?: return@execute
+                        val peerId = map["peerId"] as? String ?: return@execute
+                        val hello = GossipEngine.buildHelloEnvelope(peerId, map["postIds"])
+                        try {
+                            socketServer.sendPayloadSync(hello)
+                            mainHandler.post { result.success(null) }
+                        } catch (e: Exception) {
+                            mainHandler.post { result.error("PUSH_FAILED", e.message, null) }
                         }
                     }
                 }
-
-                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {
-                    mainHandler.post {
-                        result.error(errorCode, errorMessage, errorDetails)
-                    }
+                override fun error(code: String, msg: String?, details: Any?) {
+                    mainHandler.post { result.error(code, msg, details) }
                 }
-
                 override fun notImplemented() {
                     mainHandler.post { result.notImplemented() }
                 }
@@ -578,17 +474,13 @@ class P2PManager(
 
     /** Ground test: send a raw debug marker over the open TCP gossip socket. */
     fun sendDebugPing(payload: String, result: MethodChannel.Result) {
-        if (gossipOut == null) {
-            result.error(
-                "NO_SOCKET",
-                "No active mesh link. Connect to a peer on the Nearby tab first.",
-                null
-            )
+        if (!socketServer.isConnected()) {
+            result.error("NO_SOCKET", "No active mesh link.", null)
             return
         }
         gossipExecutor.execute {
             try {
-                sendGossipPayloadInternal(payload)
+                socketServer.sendPayloadSync(payload)
                 mainHandler.post { result.success(null) }
             } catch (e: Exception) {
                 Log.e(TAG, "sendDebugPing failed", e)
@@ -597,98 +489,87 @@ class P2PManager(
         }
     }
 
-    /** Build and send a sync frame from Flutter’s export; null on success. */
-    private fun sendSyncFromExport(export: Any?): Exception? {
-        val map = export as? Map<*, *> ?: return Exception("Missing export")
-        val peerId = map["peerId"] as? String ?: return Exception("Missing peer id")
-        if (peerId.isEmpty()) return Exception("Empty peer id")
-        return try {
-            val posts = map["posts"]
-            val postCount = (posts as? List<*>)?.size ?: 0
-            val payload = GossipEngine.buildSyncEnvelope(peerId, map["posts"])
-            sendGossipPayloadInternal(payload)
-            notifyFlutterMain(
-                "meshDebugPushSent",
-                mapOf("postCount" to postCount)
-            )
-            mainHandler.post {
-                eventChannel.invokeMethod(
-                    "gossipMarkOwnSynced",
-                    mapOf("peerId" to peerId),
-                    noopResult
-                )
-            }
-            null
-        } catch (e: Exception) {
-            e
-        }
-    }
-
     private fun handleGossipPayloadFromPeer(payload: String) {
         if (payload.startsWith("DEBUG_PING|")) {
             notifyFlutter("meshDebugPingReceived", mapOf("payload" to payload))
             return
         }
-
-        mainHandler.post {
-            eventChannel.invokeMethod("getGossipExport", null, object : MethodChannel.Result {
-                override fun success(result: Any?) {
-                    gossipExecutor.execute {
-                        val export = result as? Map<*, *> ?: return@execute
-                        val processed = GossipEngine.processIncoming(payload, export)
-                        mainHandler.post {
-                            eventChannel.invokeMethod(
-                                "gossipApplyPosts",
-                                mapOf("posts" to processed.mergedPosts),
-                                object : MethodChannel.Result {
-                                    override fun success(applyResult: Any?) {
-                                        gossipExecutor.execute {
-                                            notifyFlutterMain(
-                                                "meshDebugApplied",
-                                                mapOf(
-                                                    "mergedCount" to processed.mergedPosts.size,
-                                                    "needsAck" to processed.needsAck
-                                                )
-                                            )
-                                            if (!processed.needsAck) return@execute
-                                            val fresh = applyResult as? Map<*, *> ?: return@execute
-                                            val peerId = fresh["peerId"] as? String ?: return@execute
-                                            try {
-                                                val ack = GossipEngine.buildAckEnvelope(peerId, fresh["posts"])
-                                                sendGossipPayloadInternal(ack)
-                                                mainHandler.post {
-                                                    eventChannel.invokeMethod(
-                                                        "gossipMarkOwnSynced",
-                                                        mapOf("peerId" to peerId),
-                                                        noopResult
-                                                    )
-                                                }
-                                            } catch (e: Exception) {
-                                                Log.e(TAG, "sync_ack send failed", e)
-                                            }
-                                        }
-                                    }
-
-                                    override fun error(
-                                        errorCode: String,
-                                        errorMessage: String?,
-                                        errorDetails: Any?
-                                    ) {
-                                    }
-
-                                    override fun notImplemented() {}
-                                }
-                            )
+        
+        val type = GossipEngine.getEnvelopeType(payload)
+        if (type == "hello") {
+            val theirIds = GossipEngine.parseHelloIds(payload)
+            mainHandler.post {
+                eventChannel.invokeMethod("gossipProcessHello", mapOf("theirIds" to theirIds), object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        gossipExecutor.execute {
+                            val map = result as? Map<*, *> ?: return@execute
+                            val peerId = map["peerId"] as? String ?: return@execute
+                            val missingPosts = map["missingPosts"]
+                            val requestIds = map["requestIds"]
+                            val syncEnv = GossipEngine.buildSyncEnvelope(peerId, missingPosts, requestIds)
+                            try {
+                                socketServer.sendPayloadSync(syncEnv)
+                                val count = (missingPosts as? List<*>)?.size ?: 0
+                                notifyFlutterMain("meshDebugPushSent", mapOf("postCount" to count))
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed sending SYNC", e)
+                            }
                         }
                     }
-                }
-
-                override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
-
-                override fun notImplemented() {}
-            })
+                    override fun error(code: String, msg: String?, details: Any?) {}
+                    override fun notImplemented() {}
+                })
+            }
+        } else if (type == "sync") {
+            mainHandler.post {
+                eventChannel.invokeMethod("getPeerId", null, object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        gossipExecutor.execute {
+                            val localPeerId = result as? String ?: return@execute
+                            val parsedPosts = GossipEngine.parseSyncPosts(payload, localPeerId)
+                            val requestIds = GossipEngine.parseSyncRequestIds(payload)
+                            
+                            if (parsedPosts.isNotEmpty()) {
+                                mainHandler.post {
+                                    eventChannel.invokeMethod("gossipApplyPosts", mapOf("posts" to parsedPosts), object : MethodChannel.Result {
+                                        override fun success(res: Any?) {
+                                            notifyFlutterMain("meshDebugApplied", mapOf("mergedCount" to parsedPosts.size, "needsAck" to false))
+                                        }
+                                        override fun error(code: String, msg: String?, details: Any?) {}
+                                        override fun notImplemented() {}
+                                    })
+                                }
+                            }
+                            
+                            if (requestIds.isNotEmpty()) {
+                                mainHandler.post {
+                                    eventChannel.invokeMethod("gossipProcessSyncRequests", mapOf("requestIds" to requestIds), object : MethodChannel.Result {
+                                        override fun success(reqResult: Any?) {
+                                            gossipExecutor.execute {
+                                                val m = reqResult as? Map<*, *> ?: return@execute
+                                                val peerId = m["peerId"] as? String ?: return@execute
+                                                val missingPosts = m["missingPosts"]
+                                                val reqEnv = GossipEngine.buildSyncEnvelope(peerId, missingPosts, null)
+                                                try {
+                                                    socketServer.sendPayloadSync(reqEnv)
+                                                } catch(e: Exception){}
+                                            }
+                                        }
+                                        override fun error(code: String, msg: String?, details: Any?) {}
+                                        override fun notImplemented() {}
+                                    })
+                                }
+                            }
+                        }
+                    }
+                    override fun error(code: String, msg: String?, details: Any?) {}
+                    override fun notImplemented() {}
+                })
+            }
         }
     }
+
+
     
     // Called internally when peer events happen — pushes to Flutter (main thread only).
     private fun notifyFlutter(method: String, args: Map<String, Any>) {
@@ -703,7 +584,7 @@ class P2PManager(
     
     // Clean up resources
     fun cleanup() {
-        stopGossipTransport()
+        socketServer.stop()
         context.unregisterReceiver(receiver)
     }
 }

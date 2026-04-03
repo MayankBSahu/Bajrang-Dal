@@ -41,6 +41,17 @@ class FeedProvider extends ChangeNotifier {
     return _posts.map((p) => p.toMap()).toList();
   }
 
+  /// Returns only the post IDs for HELLO handshake (Delta Sync).
+  Future<List<String>> exportPostIdsForSync() async {
+    return _posts.map((p) => p.postId).toList();
+  }
+
+  /// Returns serialized rows for specific requested post IDs.
+  Future<List<Map<String, dynamic>>> exportSpecificPosts(List<String> requestedIds) async {
+    final requestedSet = requestedIds.toSet();
+    return _posts.where((p) => requestedSet.contains(p.postId)).map((p) => p.toMap()).toList();
+  }
+
   Future<void> markOwnPostsSynced(String authorId) async {
     await DatabaseHelper.instance.markAuthorPostsSynced(authorId);
     await loadPosts();
